@@ -1,4 +1,8 @@
-/* Paytm VRA — layout helpers on top of Tailwind (CDN). */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Paytm VRA — layout helpers on top of Tailwind. */
 
 .nav-pill {
   padding: 0.35rem 0.85rem;

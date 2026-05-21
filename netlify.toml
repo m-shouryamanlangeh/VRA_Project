@@ -9,9 +9,9 @@
 [functions]
   directory = "vra-tool/netlify/functions"
   included_files = [
-    "app/**",
-    "data/blacklists/**",
-    "data/_meta.json",
+    "vra-tool/app/**",
+    "vra-tool/data/blacklists/**",
+    "vra-tool/data/_meta.json",
   ]
 
 [[redirects]]
