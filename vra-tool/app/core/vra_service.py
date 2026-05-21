@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 from app.config import settings as app_settings
 from app.core.crypto import decrypt_secret
 from app.core.kv_store import get_value, next_pdf_sequence, set_value
-from app.core.llm.gemini import GeminiProvider, is_retryable_with_fallback, resolve_model_candidates
+from app.core.llm.gemini import (
+    GeminiProvider,
+    is_permanent_invalid_key_error,
+    is_retryable_with_fallback,
+    resolve_model_candidates,
+)
 from app.core.pdf_generator import render_vra_pdf
 from app.core.collectors import gather_evidence
 from app.core.hybrid_report import build_vra_report
@@ -224,6 +229,26 @@ def _merge_adverse(report: VRAReport, adverse: AdversePassResult) -> VRAReport:
     return VRAReport.model_validate(data)
 
 
+def _deactivate_bad_key(row_id: int) -> None:
+    """Mark a key inactive in its own short transaction so the change survives
+    even if the outer /generate flow rolls back."""
+    from app.database import SessionLocal
+
+    sess = SessionLocal()
+    try:
+        bad = sess.get(ApiKey, row_id)
+        if bad is not None and bad.is_active:
+            bad.is_active = False
+            sess.add(bad)
+            sess.commit()
+            logger.warning("Auto-deactivated invalid Gemini key id=%s label=%s", bad.id, bad.label)
+    except Exception as exc:
+        logger.warning("Failed to auto-deactivate key id=%s: %s", row_id, exc)
+        sess.rollback()
+    finally:
+        sess.close()
+
+
 async def _run_gemini_attempts(
     db: Session,
     candidates: list[tuple[ApiKey | None, str, str]],
@@ -238,6 +263,7 @@ async def _run_gemini_attempts(
     """Try each key × each model fallback until success or non-retryable error."""
     total_tokens = 0
     last_error: BaseException | None = None
+    invalid_key_count = 0
     _, first_secret, _ = candidates[0]
     models_to_try = await resolve_model_candidates(model, first_secret)
     for try_model in models_to_try:
@@ -260,6 +286,15 @@ async def _run_gemini_attempts(
                 return out, row, label, total_tokens
             except Exception as exc:
                 last_error = exc
+                if is_permanent_invalid_key_error(exc):
+                    invalid_key_count += 1
+                    if row is not None:
+                        _deactivate_bad_key(row.id)
+                    logger.warning(
+                        "Gemini key %s rejected as invalid; deactivated. Continuing.",
+                        label,
+                    )
+                    continue
                 if is_retryable_with_fallback(exc):
                     logger.warning(
                         "Gemini failed (key=%s, model=%s), trying next: %s",
@@ -267,6 +302,11 @@ async def _run_gemini_attempts(
                     )
                     continue
                 raise
+    if invalid_key_count and invalid_key_count == len(candidates):
+        raise ValueError(
+            "All Gemini API keys are invalid. Add a working key in Settings → API Keys "
+            "(get one from https://aistudio.google.com/apikey)."
+        )
     if last_error:
         raise last_error
     raise RuntimeError("No Gemini API keys configured")

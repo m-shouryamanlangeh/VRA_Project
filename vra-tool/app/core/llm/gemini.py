@@ -190,6 +190,23 @@ def _is_json_mode_not_supported_error(exc: BaseException) -> bool:
     )
 
 
+def is_permanent_invalid_key_error(exc: BaseException) -> bool:
+    """
+    Distinguish a permanently-broken key (typo, revoked, wrong project) from
+    transient/quota errors. Used to auto-deactivate a key so the rotation
+    doesn't keep wasting calls on a dead key.
+    """
+    msg = str(exc).lower()
+    if "api_key_invalid" in msg:
+        return True
+    if "api key not valid" in msg:
+        return True
+    if isinstance(exc, genai_errors.ClientError) and exc.code in (401, 403):
+        # 401/403 with no quota signal → credential rejected, not rate-limited
+        return "quota" not in msg and "rate" not in msg and "exhausted" not in msg
+    return False
+
+
 def _is_retryable_with_fallback(exc: BaseException) -> bool:
     """Whether to try the next API key or model candidate."""
     if isinstance(exc, genai_errors.ClientError):
