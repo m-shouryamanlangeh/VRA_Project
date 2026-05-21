@@ -1,0 +1,30 @@
+# Phase 1+ core
+fastapi>=0.109.0
+python-multipart>=0.0.9
+uvicorn[standard]>=0.27.0
+sqlalchemy>=2.0.25
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Phase 2+ (LLM, crypto, HTTP)
+cryptography>=42.0.0
+httpx>=0.26.0
+google-genai>=1.0.0
+feedparser>=6.0.10
+rapidfuzz>=3.6.0
+beautifulsoup4>=4.12.0
+lxml>=5.1.0
+
+# Phase 4+ (weasyprint removed — ReportLab used instead, no native OS libs needed)
+
+# Phase 5+
+openpyxl>=3.1.2
+
+# Serverless adapter (Netlify / AWS Lambda)
+mangum>=0.17.0
+
+# Phase 6
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pypdf>=4.0.0

@@ -1,0 +1,17 @@
+{
+  "last_refresh_epoch": 1777535890.643158,
+  "last_results": {
+    "MCA \u2014 Struck Off Companies": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "MCA \u2014 Shell Companies (speculative)": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "RBI \u2014 Wilful Defaulters (public disclosures)": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "SEBI \u2014 Debarred / Restricted entities": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "SEBI \u2014 Intermediary enforcement": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "MCA \u2014 Disqualified Directors": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "IEPF \u2014 Nodal / unclaimed shares (reference)": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "MCA \u2014 CIN struck-off historical (mirror)": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "SFIO \u2014 Published orders (reference)": "error:[SSL: TLSV1_UNRECOGNIZED_NAME] tlsv1 unrecognized name (_ssl.c:1081)",
+    "FIU-IND \u2014 AML advisories (reference)": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "NSE/BSE \u2014 SME defaulters (reference)": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)",
+    "NPO / Trust defunct reference list": "error:[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1081)"
+  }
+}

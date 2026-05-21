@@ -1,0 +1,59 @@
+/* Paytm VRA — layout helpers on top of Tailwind (CDN). */
+
+.nav-pill {
+  padding: 0.35rem 0.85rem;
+  border-radius: 9999px;
+  color: #002970;
+  text-decoration: none;
+  transition: background 0.15s ease;
+  cursor: pointer;
+}
+.nav-pill:hover {
+  background: #e0f4fc;
+}
+.nav-pill.active {
+  background: #00baf2;
+  color: #fff;
+}
+
+.tab-btn {
+  color: #64748b;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  cursor: pointer;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-top-left-radius: 0.5rem;
+  border-top-right-radius: 0.5rem;
+}
+.tab-btn.active {
+  color: #002970;
+  border-color: #00baf2;
+}
+
+.toast {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  padding: 0.75rem 1.25rem;
+  border-radius: 0.5rem;
+  color: #fff;
+  background: #b91c1c;
+  z-index: 50;
+  max-width: 420px;
+  box-shadow: 0 8px 24px rgba(0, 41, 112, 0.15);
+}
+.toast.hidden {
+  display: none;
+}
+
+.spinner {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
