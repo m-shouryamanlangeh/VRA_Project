@@ -59,21 +59,27 @@ app = FastAPI(
 )
 
 # The React frontend (Vite dev on :5173, Netlify in prod) calls this API across origins.
-_cors_origins = (
-    ["*"]
-    if _IS_LAMBDA
-    else [
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
-    ]
-)
+# CORS_ALLOW_ORIGINS is a comma-separated list. "*" disables credentialed CORS.
+_default_dev_origins = [
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+]
+_env_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+if _env_origins:
+    _cors_origins = [o.strip() for o in _env_origins.split(",") if o.strip()]
+elif _IS_LAMBDA:
+    _cors_origins = ["*"]
+else:
+    _cors_origins = _default_dev_origins
+
+_wildcard = _cors_origins == ["*"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=not _IS_LAMBDA,
+    allow_credentials=not _wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )

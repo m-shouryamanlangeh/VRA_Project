@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { useToast } from "../ToastContext.jsx";
+import { apiFetch, apiUrl } from "../api.js";
 
 const ORG_TYPES = [
   "",
@@ -55,7 +56,7 @@ export default function HomePage() {
       setProgressSteps((s) => [...s, "Gathering OSINT evidence…"]);
       setProgressText("Validating findings…");
 
-      const res = await fetch("/generate", {
+      const res = await apiFetch("/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -74,7 +75,7 @@ export default function HomePage() {
       setProgressText("Done");
 
       const params = new URLSearchParams({
-        pdf: data.pdf_url || "",
+        pdf: data.pdf_url ? apiUrl(data.pdf_url) : "",
         vendor: form.vendor_name,
         audit_id: String(data.audit_id || ""),
       });
@@ -119,7 +120,7 @@ export default function HomePage() {
     try {
       const fd = new FormData();
       fd.append("file", batchFile);
-      const res = await fetch("/generate/batch", { method: "POST", body: fd });
+      const res = await apiFetch("/generate/batch", { method: "POST", body: fd });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || res.statusText);

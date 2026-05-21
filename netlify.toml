@@ -4,45 +4,11 @@
 
 [build.environment]
   NODE_VERSION = "20"
-  PYTHON_VERSION = "3.11"
 
-[functions]
-  directory = "vra-tool/netlify/functions"
-  included_files = [
-    "vra-tool/app/**",
-    "vra-tool/data/blacklists/**",
-    "vra-tool/data/_meta.json",
-  ]
-
-[[redirects]]
-  from = "/generate"
-  to = "/.netlify/functions/api/generate"
-  status = 200
-
-[[redirects]]
-  from = "/generate/*"
-  to = "/.netlify/functions/api/generate/:splat"
-  status = 200
-
-[[redirects]]
-  from = "/download/*"
-  to = "/.netlify/functions/api/download/:splat"
-  status = 200
-
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/api/api/:splat"
-  status = 200
-
-[[redirects]]
-  from = "/settings/test"
-  to = "/.netlify/functions/api/settings/test"
-  status = 200
-
-[[redirects]]
-  from = "/health"
-  to = "/.netlify/functions/api/health"
-  status = 200
+# Backend is hosted on Render — see app/main.py.
+# All frontend API calls go cross-origin via VITE_API_BASE_URL at build time,
+# so Netlify only serves the static React bundle. SPA fallback below routes
+# unknown paths back to index.html for client-side React Router.
 
 [[redirects]]
   from = "/*"

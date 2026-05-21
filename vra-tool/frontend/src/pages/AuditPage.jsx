@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../ToastContext.jsx";
+import { apiFetch, apiUrl } from "../api.js";
 
 const PAGE_SIZE = 50;
 
@@ -21,7 +22,7 @@ export default function AuditPage() {
     if (appliedFilters.from) qs.set("date_from", appliedFilters.from);
     if (appliedFilters.to) qs.set("date_to", appliedFilters.to);
     const tail = qs.toString();
-    return "/api/audit/export.csv" + (tail ? "?" + tail : "");
+    return apiUrl("/api/audit/export.csv" + (tail ? "?" + tail : ""));
   }, [appliedFilters]);
 
   useEffect(() => {
@@ -36,7 +37,7 @@ export default function AuditPage() {
         if (appliedFilters.vendor) qs.set("vendor", appliedFilters.vendor);
         if (appliedFilters.from) qs.set("date_from", appliedFilters.from);
         if (appliedFilters.to) qs.set("date_to", appliedFilters.to);
-        const res = await fetch("/api/audit?" + qs.toString());
+        const res = await apiFetch("/api/audit?" + qs.toString());
         const body = await res.json();
         if (!res.ok) throw new Error(body.detail || "Failed to load audit");
         if (!cancelled) setData(body);
@@ -138,7 +139,7 @@ export default function AuditPage() {
                     {pdfName ? (
                       <a
                         className="text-paytm-blue underline"
-                        href={"/download/pdf/" + encodeURIComponent(pdfName)}
+                        href={apiUrl("/download/pdf/" + encodeURIComponent(pdfName))}
                       >
                         Download
                       </a>

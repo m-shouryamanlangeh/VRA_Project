@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useToast } from "../ToastContext.jsx";
+import { apiFetch } from "../api.js";
 
 const DEFAULT_STATE = {
   llm_provider: "gemini",
@@ -108,7 +109,7 @@ export default function SettingsPage() {
 
   async function load() {
     try {
-      const res = await fetch("/api/settings");
+      const res = await apiFetch("/api/settings");
       const s = await res.json();
       setState(s);
       setKeys((s.keys || []).map(buildKey));
@@ -177,7 +178,7 @@ export default function SettingsPage() {
       keys: staged,
     };
     try {
-      const res = await fetch("/api/settings", {
+      const res = await apiFetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -194,7 +195,7 @@ export default function SettingsPage() {
   async function test() {
     setTestResult("…");
     try {
-      const res = await fetch("/api/settings/test", { method: "POST" });
+      const res = await apiFetch("/api/settings/test", { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setTestResult("❌");
