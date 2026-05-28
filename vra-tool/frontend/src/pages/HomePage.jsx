@@ -32,6 +32,8 @@ export default function HomePage() {
   const [batchDownload, setBatchDownload] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef(null);
+  const abortRef = useRef(null);
+  const batchAbortRef = useRef(null);
 
   useEffect(() => {
     if (location.hash === "#batch-panel") setTab("batch");
@@ -47,6 +49,8 @@ export default function HomePage() {
     setSubmitting(true);
     setProgressSteps([]);
     setProgressText("Searching open sources…");
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       await new Promise((r) => setTimeout(r, 400));
@@ -64,6 +68,7 @@ export default function HomePage() {
           gst: form.gst || "",
           org_type: form.org_type,
         }),
+        signal: controller.signal,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -81,11 +86,22 @@ export default function HomePage() {
       });
       navigate("/result?" + params.toString());
     } catch (err) {
-      showToast(err.message || String(err), false);
+      if (err.name === "AbortError") {
+        showToast("Generation cancelled", false);
+      } else {
+        showToast(err.message || String(err), false);
+      }
       setProgressSteps([]);
       setProgressText("");
     } finally {
       setSubmitting(false);
+      abortRef.current = null;
+    }
+  }
+
+  function stopGenerate() {
+    if (abortRef.current) {
+      abortRef.current.abort();
     }
   }
 
@@ -116,11 +132,17 @@ export default function HomePage() {
     setBatchPct(10);
     setBatchStatus("Processing… (this may take several minutes)");
     setBatchDownload(null);
+    const controller = new AbortController();
+    batchAbortRef.current = controller;
 
     try {
       const fd = new FormData();
       fd.append("file", batchFile);
-      const res = await apiFetch("/generate/batch", { method: "POST", body: fd });
+      const res = await apiFetch("/generate/batch", {
+        method: "POST",
+        body: fd,
+        signal: controller.signal,
+      });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || res.statusText);
@@ -135,10 +157,23 @@ export default function HomePage() {
       );
       showToast("Batch ZIP downloaded", true);
     } catch (e) {
-      showToast(e.message || String(e), false);
-      setBatchStatus("");
+      if (e.name === "AbortError") {
+        showToast("Batch cancelled", false);
+        setBatchStatus("");
+        setBatchPct(0);
+      } else {
+        showToast(e.message || String(e), false);
+        setBatchStatus("");
+      }
     } finally {
       setBatchRunning(false);
+      batchAbortRef.current = null;
+    }
+  }
+
+  function stopBatch() {
+    if (batchAbortRef.current) {
+      batchAbortRef.current.abort();
     }
   }
 
@@ -234,6 +269,15 @@ export default function HomePage() {
               >
                 Generate VRA Report
               </button>
+              {submitting && (
+                <button
+                  type="button"
+                  onClick={stopGenerate}
+                  className="px-5 py-2.5 rounded-lg bg-red-600 text-white font-medium hover:opacity-90"
+                >
+                  Stop
+                </button>
+              )}
               <button
                 type="reset"
                 onClick={() =>
@@ -349,6 +393,15 @@ export default function HomePage() {
             >
               {batchRunning ? "Generating…" : "Generate All"}
             </button>
+            {batchRunning && (
+              <button
+                type="button"
+                onClick={stopBatch}
+                className="px-5 py-2.5 rounded-lg bg-red-600 text-white font-medium hover:opacity-90"
+              >
+                Stop
+              </button>
+            )}
             {(batchRunning || batchPct > 0) && (
               <div className="flex-1">
                 <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
