@@ -12,27 +12,11 @@ from app.schemas import GST_RE, AdverseFinding, Finding, SynthesisResult, VRARep
 
 logger = logging.getLogger(__name__)
 
-# Canonical portal per report section. Used as the cited source when hybrid
-# collectors return no real evidence — so each "no signal" finding still
-# points the reader at the right authoritative portal to check manually.
-_SECTION_SOURCES: dict[str, str] = {
-    "company_profile":      "https://www.mca.gov.in/",
-    "management":           "https://www.mca.gov.in/",
-    "mca_filings":          "https://www.mca.gov.in/",
-    "credit_ratings":       "https://www.crisil.com/",
-    "financial_soundness":  "https://economictimes.indiatimes.com/",
-    "borrowings":           "https://www.rbi.org.in/",
-    "funds_raised":         "https://economictimes.indiatimes.com/",
-    "defaults":             "https://www.rbi.org.in/",
-    "litigations":          "https://ecourts.gov.in/",
-    "statutory_compliance": "https://www.gst.gov.in/",
-}
-_DEFAULT_SOURCE = "https://www.mca.gov.in/"
+_PLACEHOLDER_SOURCE = "https://www.mca.gov.in/"
 
 
-def _finding(point: str, severity: str = "INFO", *, section: str | None = None) -> Finding:
-    src = _SECTION_SOURCES.get(section or "", _DEFAULT_SOURCE)
-    return Finding(point=point, source=src, severity=severity)  # type: ignore[arg-type]
+def _finding(point: str, severity: str = "INFO") -> Finding:
+    return Finding(point=point, source=_PLACEHOLDER_SOURCE, severity=severity)  # type: ignore[arg-type]
 
 
 def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
@@ -57,52 +41,80 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     es.setdefault("risk_level", synthesis.risk_rating)
     # Without a verified GSTIN, do not let the model label the whole case HIGH (name-only OSINT is ambiguous).
     gstin_ok = bool(GST_RE.match(str(v.get("gst") or "").strip().upper()))
-    if not gstin_ok and synthesis.risk_rating == "HIGH":
-        logger.info("Hybrid: capping portfolio risk_rating HIGH→MEDIUM (no verified GSTIN on request)")
-        es["risk_rating"] = "MEDIUM"
-        es["risk_level"] = "MEDIUM"
+    if not gstin_ok:
+        # Persist the cap as a flag so the downstream calibrated-rubric pass
+        # (report_normalization._ensure_calibrated_rubric) does not silently
+        # re-promote the rating back to HIGH based on LLM dimension scores.
+        es["_capped_no_gstin"] = True
+        if synthesis.risk_rating == "HIGH":
+            logger.info("Hybrid: capping portfolio risk_rating HIGH→MEDIUM (no verified GSTIN on request)")
+            es["risk_rating"] = "MEDIUM"
+            es["risk_level"] = "MEDIUM"
     es["top_findings"] = list(synthesis.top_findings or [])
     es["top_positives"] = list(synthesis.top_positives or [])
     company_profile: list[Finding] = []
     if gst:
         if gst.get("legal_name"):
             company_profile.append(
-                _finding(f"GST legal name: {gst['legal_name']}", section="company_profile")
+                _finding(f"GST legal name: {gst['legal_name']}")
             )
         if gst.get("trade_name"):
-            company_profile.append(_finding(f"GST trade name: {gst['trade_name']}", section="company_profile"))
+            company_profile.append(_finding(f"GST trade name: {gst['trade_name']}"))
         if gst.get("gst_status"):
-            company_profile.append(_finding(f"GST status (API): {gst['gst_status']}", section="company_profile"))
+            company_profile.append(_finding(f"GST status (API): {gst['gst_status']}"))
         if gst.get("registration_date"):
             company_profile.append(
-                _finding(f"GST registration date (API): {gst['registration_date']}", section="company_profile")
+                _finding(f"GST registration date (API): {gst['registration_date']}")
             )
         if gst.get("state_jurisdiction"):
             company_profile.append(
-                _finding(f"State jurisdiction (API): {gst['state_jurisdiction']}", section="company_profile")
+                _finding(f"State jurisdiction (API): {gst['state_jurisdiction']}")
             )
         if gst.get("business_type"):
-            company_profile.append(_finding(f"Constitution / business type (API): {gst['business_type']}", section="company_profile"))
+            company_profile.append(_finding(f"Constitution / business type (API): {gst['business_type']}"))
         if gst.get("address"):
-            company_profile.append(_finding(f"Principal address (API): {gst['address'][:500]}", section="company_profile"))
+            company_profile.append(_finding(f"Principal address (API): {gst['address'][:500]}"))
     if not company_profile:
         if not (str(v.get("gst") or "").strip()):
             company_profile.append(
                 _finding(
                     "No GSTIN provided — profile is based on vendor name, news/RSS, and web-style "
                     "OSINT only. Obtain a GSTIN for statutory verification on "
-                    "https://services.gst.gov.in/services/searchgstin .",
-                    section="company_profile",
+                    "https://services.gst.gov.in/services/searchgstin ."
                 )
             )
         else:
             company_profile.append(
                 _finding(
                     "Hybrid mode: GST public API returned no usable fields — verify GSTIN manually "
-                    f"on https://services.gst.gov.in/services/searchgstin .",
-                    section="company_profile",
+                    f"on https://services.gst.gov.in/services/searchgstin ."
                 )
             )
+
+    # Entity-scope disclaimer: when no GSTIN was supplied, findings from
+    # name-only OSINT may pull in news about *related* legal entities sharing
+    # the trade name (e.g. searching "PAYTM" surfaces results about One97
+    # Communications Ltd and Paytm Payments Bank Ltd — three distinct legal
+    # persons). Surface this prominently so reviewers don't assume all
+    # findings concern the exact entity they intended to onboard.
+    if not gstin_ok:
+        company_profile.insert(
+            0,
+            Finding(
+                point=(
+                    "ENTITY SCOPE WARNING: No GSTIN supplied. Findings below may concern related "
+                    "legal entities sharing the trade name (e.g. holding company, payments bank "
+                    "subsidiary, group affiliates). Verify the exact legal entity on "
+                    "https://services.gst.gov.in/services/searchgstin or "
+                    "https://www.mca.gov.in/ before relying on any conclusion."
+                ),
+                source="https://services.gst.gov.in/services/searchgstin",
+                severity="MEDIUM",  # type: ignore[arg-type]
+            ),
+        )
+        es["entity_scope_warning"] = (
+            "Findings derived from name-only OSINT; specific legal entity not verified."
+        )
 
     management: list[Finding] = []
     directors = mca.get("directors") if isinstance(mca.get("directors"), list) else []
@@ -110,13 +122,12 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
         for d in directors[:20]:
             if isinstance(d, dict):
                 line = ", ".join(f"{k}: {v}" for k, v in d.items() if v)
-                management.append(_finding(f"Director / signatory (MCA): {line}", section="management"))
+                management.append(_finding(f"Director / signatory (MCA): {line}"))
     else:
         management.append(
             _finding(
                 "Hybrid mode: MCA director scrape / API not available (CAPTCHA). "
-                "Director due-diligence is manual for this run.",
-                section="management",
+                "Director due-diligence is manual for this run."
             )
         )
 
@@ -124,59 +135,51 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     if mca:
         for key in ("cin", "company_status", "incorporation_date", "auth_capital", "paid_up_capital", "roc_code"):
             if mca.get(key):
-                mca_filings.append(_finding(f"MCA {key}: {mca[key]}", section="mca_filings"))
+                mca_filings.append(_finding(f"MCA {key}: {mca[key]}"))
     if not mca_filings:
         mca_filings.append(
             _finding(
-                "Hybrid mode: no MCA master data retrieved — CIN / charge filings require MCA21 or vendor disclosure.",
-                section="mca_filings",
+                "Hybrid mode: no MCA master data retrieved — CIN / charge filings require MCA21 or vendor disclosure."
             )
         )
 
     credit_ratings = [
         _finding(
             "Hybrid mode: CRISIL/ICRA credit feeds are not automated in this release; "
-            "obtain rating letters from the vendor if material.",
-            section="credit_ratings",
+            "obtain rating letters from the vendor if material."
         )
     ]
     financial_soundness = [
         _finding(
             "Hybrid mode: financial soundness is inferred from public news + GST posture only; "
-            "full accounts are out of scope for collectors.",
-            section="financial_soundness",
+            "full accounts are out of scope for collectors."
         )
     ]
     borrowings = [
         _finding(
             "Hybrid mode: borrowings / charge data not scraped (MCA CAPTCHA). "
-            "Request MCA CHG-7 / lender confirmations for material exposures.",
-            section="borrowings",
+            "Request MCA CHG-7 / lender confirmations for material exposures."
         )
     ]
     funds_raised = [
         _finding(
-            "Hybrid mode: funds-raised review is manual; check MCA filings and press when relevant.",
-            section="funds_raised",
+            "Hybrid mode: funds-raised review is manual; check MCA filings and press when relevant."
         )
     ]
     defaults = [
         _finding(
-            "Hybrid mode: defaults / wilful defaulter screening is manual — verify via RBI / CIBIL portals.",
-            section="defaults",
+            "Hybrid mode: defaults / wilful defaulter screening is manual — verify via RBI / CIBIL portals."
         )
     ]
     litigations = [
         _finding(
             "Hybrid mode: eCourts / NCLT scraping deferred (CAPTCHA / paid APIs). "
-            "News scan may surface litigation hints only.",
-            section="litigations",
+            "News scan may surface litigation hints only."
         )
     ]
     statutory_compliance = [
         _finding(
-            "Hybrid mode: statutory compliance is limited to GST status in this release.",
-            section="statutory_compliance",
+            "Hybrid mode: statutory compliance is limited to GST status in this release."
         )
     ]
 
@@ -214,7 +217,7 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
                 entity=v.get("name", ""),
                 search_hyperlink=entity_link,
                 summary="No adverse headlines returned from Google News RSS for the constructed query.",
-                severity="LOW",
+                severity="INFO",
                 source=None,
             )
         )

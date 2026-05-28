@@ -68,8 +68,24 @@ _SEVERITY_TO_SCORE: dict[str, int] = {
 }
 
 
+_NEGATION_TOKENS: tuple[str, ...] = (
+    "no ", "not ", "none ", "never ",
+    "no specific", "no adverse", "no record", "no evidence", "no listing",
+    "no active", "no direct", "no known", "no public",
+    "absent", "did not", "didn't", "doesn't ", "does not",
+    "without ", "free of ", "free from ",
+    "negative finding",
+)
+
+
 def _score_for_finding_text(text: str) -> int:
-    """Bump score to 100 when the finding clearly cites a veto-class event."""
+    """Bump score to 100 when the finding clearly cites a veto-class event.
+
+    Negation guard: if a veto marker is preceded (within ~60 chars) by a
+    negation phrase, treat it as a "no record found" statement and DO NOT
+    escalate. Without this, the LLM saying "No wilful defaulter listings
+    were found" trips the veto path on the keyword inside its own negation.
+    """
     t = (text or "").lower()
     veto_markers = (
         "wilful default", "willful default",
@@ -82,7 +98,16 @@ def _score_for_finding_text(text: str) -> int:
         "struck off", "struck-off", "disqualified director",
         "uapa", "fatf black",
     )
-    return 100 if any(m in t for m in veto_markers) else 0
+    for m in veto_markers:
+        idx = t.find(m)
+        if idx == -1:
+            continue
+        window_start = max(0, idx - 60)
+        prefix = t[window_start:idx]
+        if any(neg in prefix for neg in _NEGATION_TOKENS):
+            continue
+        return 100
+    return 0
 
 
 def _derive_dimension_score(findings: list[Any]) -> int:
@@ -96,9 +121,9 @@ def _derive_dimension_score(findings: list[Any]) -> int:
         sev = str(f.get("severity") or "").upper()
         base = _SEVERITY_TO_SCORE.get(sev, 25)
         text = f.get("point") or f.get("summary") or ""
-        # Skip veto-marker text scan for explicit no-signal findings. Hybrid-mode
-        # placeholder text (e.g. "wilful defaulter screening is manual") describes
-        # what was NOT checked and would otherwise auto-trigger HIGH on clean vendors.
+        # Skip veto-marker text scan for explicit no-signal findings. The LLM
+        # describes "no wilful defaulter listings found" using the keyword
+        # itself; without this guard, every clean vendor gets bumped to 100.
         if sev in ("INFO", "NONE"):
             bumped = base
         else:
@@ -181,6 +206,35 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
         if dim[k] < 0:
             dim[k] = 0
 
+    # Phantom-dimension guard: if the LLM reports a high score for a dimension
+    # but the corresponding section contains no non-INFO findings, the score
+    # is unsupported. Cap at 25 (LOW band) so it cannot drive overall rating
+    # or floor rules. Note: a finding with a rescued citation ("[Verify
+    # manually:" note) DOES count as backing evidence here — the LLM observed
+    # something during search, the URL just couldn't be deep-linked. The note
+    # in the report tells reviewers to verify; we don't silently delete the
+    # claim by capping the score.
+    _dim_to_section = {v: k for k, v in _SECTION_TO_DIMENSION.items()}
+    for dim_key, score_val in list(dim.items()):
+        if score_val < 50:
+            continue
+        section = _dim_to_section.get(dim_key)
+        if not section:
+            continue
+        rows = data.get(section) or []
+        has_real_finding = any(
+            isinstance(r, dict)
+            and str(r.get("severity") or "").upper() not in ("", "INFO", "NONE")
+            for r in rows
+        )
+        if not has_real_finding:
+            logger.warning(
+                "Phantom dim score: '%s'=%d but section '%s' has no non-INFO "
+                "findings — capping at 25",
+                dim_key, score_val, section,
+            )
+            dim[dim_key] = min(score_val, 25)
+
     es["dimension_scores"] = dim
 
     # 2. risk_score (compute if missing or out of range).
@@ -213,14 +267,19 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
 
     # 5. risk_rating — recompute if missing/invalid OR if Gemini's value contradicts
     #    the score + veto rules (e.g. score=70 but rating=LOW).
+    # When the hybrid path has capped the rating because no GSTIN was supplied,
+    # never let the upward promotion below re-escalate it: name-only OSINT can
+    # legitimately produce high dim scores about *related* entities, and
+    # promoting those to HIGH would defeat the cap.
+    capped_no_gstin = bool(es.get("_capped_no_gstin"))
     rr = str(es.get("risk_rating") or es.get("risk_level") or "").upper()
     computed_rating = _score_to_rating(score, dim, veto)
     if rr not in ("HIGH", "MEDIUM", "LOW"):
-        rr = computed_rating
+        rr = computed_rating if not (capped_no_gstin and computed_rating == "HIGH") else "MEDIUM"
     else:
         # Promote if the computed rating is stricter (never silently downgrade Gemini).
         order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-        if order[computed_rating] > order[rr]:
+        if order[computed_rating] > order[rr] and not capped_no_gstin:
             rr = computed_rating
     es["risk_rating"] = rr
 
@@ -228,6 +287,12 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
     expected_rec = _rating_to_recommendation(rr, conf)
     given_rec = str(data.get("recommendation") or "").upper()
     if given_rec not in ("PROCEED", "CONDITIONAL", "REJECT"):
+        data["recommendation"] = expected_rec
+    elif capped_no_gstin:
+        # When the no-GSTIN cap is active the rubric mapping is authoritative.
+        # The "safety bias" upgrade-only path below would let an LLM-asserted
+        # REJECT survive even though the calibrated rating is now MEDIUM,
+        # producing a contradiction in the executive summary.
         data["recommendation"] = expected_rec
     else:
         # If Gemini said PROCEED but rating is MEDIUM/HIGH → override (safety bias).

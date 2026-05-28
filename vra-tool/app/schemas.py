@@ -24,20 +24,21 @@ class AdverseFinding(BaseModel):
     entity: str
     search_hyperlink: str
     summary: str
-    severity: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    severity: Literal["HIGH", "MEDIUM", "LOW", "INFO"] = "INFO"
     source: Optional[str] = None
 
     @field_validator("severity", mode="before")
     @classmethod
     def coerce_severity(cls, v: Any) -> str:
-        """Coerce non-standard values (INFO, NONE, UNKNOWN, etc.) → LOW."""
+        """Coerce non-standard values → INFO (default for clean no-signal rows)."""
         if v is None:
-            return "LOW"
+            return "INFO"
         s = str(v).strip().upper()
-        if s in ("HIGH", "MEDIUM", "LOW"):
+        if s in ("HIGH", "MEDIUM", "LOW", "INFO"):
             return s
-        # Any other value (INFO, NONE, N/A, INFORMATIONAL, …) → LOW
-        return "LOW"
+        if s in ("NONE", "N/A", "NA", "INFORMATIONAL", ""):
+            return "INFO"
+        return "INFO"
 
 
 class VRAReport(BaseModel):
