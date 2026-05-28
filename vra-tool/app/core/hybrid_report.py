@@ -12,11 +12,27 @@ from app.schemas import GST_RE, AdverseFinding, Finding, SynthesisResult, VRARep
 
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER_SOURCE = "https://www.mca.gov.in/"
+# Canonical portal per report section. Used as the cited source when hybrid
+# collectors return no real evidence — so each "no signal" finding still
+# points the reader at the right authoritative portal to check manually.
+_SECTION_SOURCES: dict[str, str] = {
+    "company_profile":      "https://www.mca.gov.in/",
+    "management":           "https://www.mca.gov.in/",
+    "mca_filings":          "https://www.mca.gov.in/",
+    "credit_ratings":       "https://www.crisil.com/",
+    "financial_soundness":  "https://economictimes.indiatimes.com/",
+    "borrowings":           "https://www.rbi.org.in/",
+    "funds_raised":         "https://economictimes.indiatimes.com/",
+    "defaults":             "https://www.rbi.org.in/",
+    "litigations":          "https://ecourts.gov.in/",
+    "statutory_compliance": "https://www.gst.gov.in/",
+}
+_DEFAULT_SOURCE = "https://www.mca.gov.in/"
 
 
-def _finding(point: str, severity: str = "INFO") -> Finding:
-    return Finding(point=point, source=_PLACEHOLDER_SOURCE, severity=severity)  # type: ignore[arg-type]
+def _finding(point: str, severity: str = "INFO", *, section: str | None = None) -> Finding:
+    src = _SECTION_SOURCES.get(section or "", _DEFAULT_SOURCE)
+    return Finding(point=point, source=src, severity=severity)  # type: ignore[arg-type]
 
 
 def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
@@ -51,38 +67,40 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     if gst:
         if gst.get("legal_name"):
             company_profile.append(
-                _finding(f"GST legal name: {gst['legal_name']}")
+                _finding(f"GST legal name: {gst['legal_name']}", section="company_profile")
             )
         if gst.get("trade_name"):
-            company_profile.append(_finding(f"GST trade name: {gst['trade_name']}"))
+            company_profile.append(_finding(f"GST trade name: {gst['trade_name']}", section="company_profile"))
         if gst.get("gst_status"):
-            company_profile.append(_finding(f"GST status (API): {gst['gst_status']}"))
+            company_profile.append(_finding(f"GST status (API): {gst['gst_status']}", section="company_profile"))
         if gst.get("registration_date"):
             company_profile.append(
-                _finding(f"GST registration date (API): {gst['registration_date']}")
+                _finding(f"GST registration date (API): {gst['registration_date']}", section="company_profile")
             )
         if gst.get("state_jurisdiction"):
             company_profile.append(
-                _finding(f"State jurisdiction (API): {gst['state_jurisdiction']}")
+                _finding(f"State jurisdiction (API): {gst['state_jurisdiction']}", section="company_profile")
             )
         if gst.get("business_type"):
-            company_profile.append(_finding(f"Constitution / business type (API): {gst['business_type']}"))
+            company_profile.append(_finding(f"Constitution / business type (API): {gst['business_type']}", section="company_profile"))
         if gst.get("address"):
-            company_profile.append(_finding(f"Principal address (API): {gst['address'][:500]}"))
+            company_profile.append(_finding(f"Principal address (API): {gst['address'][:500]}", section="company_profile"))
     if not company_profile:
         if not (str(v.get("gst") or "").strip()):
             company_profile.append(
                 _finding(
                     "No GSTIN provided — profile is based on vendor name, news/RSS, and web-style "
                     "OSINT only. Obtain a GSTIN for statutory verification on "
-                    "https://services.gst.gov.in/services/searchgstin ."
+                    "https://services.gst.gov.in/services/searchgstin .",
+                    section="company_profile",
                 )
             )
         else:
             company_profile.append(
                 _finding(
                     "Hybrid mode: GST public API returned no usable fields — verify GSTIN manually "
-                    f"on https://services.gst.gov.in/services/searchgstin ."
+                    f"on https://services.gst.gov.in/services/searchgstin .",
+                    section="company_profile",
                 )
             )
 
@@ -92,12 +110,13 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
         for d in directors[:20]:
             if isinstance(d, dict):
                 line = ", ".join(f"{k}: {v}" for k, v in d.items() if v)
-                management.append(_finding(f"Director / signatory (MCA): {line}"))
+                management.append(_finding(f"Director / signatory (MCA): {line}", section="management"))
     else:
         management.append(
             _finding(
                 "Hybrid mode: MCA director scrape / API not available (CAPTCHA). "
-                "Director due-diligence is manual for this run."
+                "Director due-diligence is manual for this run.",
+                section="management",
             )
         )
 
@@ -105,51 +124,59 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     if mca:
         for key in ("cin", "company_status", "incorporation_date", "auth_capital", "paid_up_capital", "roc_code"):
             if mca.get(key):
-                mca_filings.append(_finding(f"MCA {key}: {mca[key]}"))
+                mca_filings.append(_finding(f"MCA {key}: {mca[key]}", section="mca_filings"))
     if not mca_filings:
         mca_filings.append(
             _finding(
-                "Hybrid mode: no MCA master data retrieved — CIN / charge filings require MCA21 or vendor disclosure."
+                "Hybrid mode: no MCA master data retrieved — CIN / charge filings require MCA21 or vendor disclosure.",
+                section="mca_filings",
             )
         )
 
     credit_ratings = [
         _finding(
             "Hybrid mode: CRISIL/ICRA credit feeds are not automated in this release; "
-            "obtain rating letters from the vendor if material."
+            "obtain rating letters from the vendor if material.",
+            section="credit_ratings",
         )
     ]
     financial_soundness = [
         _finding(
             "Hybrid mode: financial soundness is inferred from public news + GST posture only; "
-            "full accounts are out of scope for collectors."
+            "full accounts are out of scope for collectors.",
+            section="financial_soundness",
         )
     ]
     borrowings = [
         _finding(
             "Hybrid mode: borrowings / charge data not scraped (MCA CAPTCHA). "
-            "Request MCA CHG-7 / lender confirmations for material exposures."
+            "Request MCA CHG-7 / lender confirmations for material exposures.",
+            section="borrowings",
         )
     ]
     funds_raised = [
         _finding(
-            "Hybrid mode: funds-raised review is manual; check MCA filings and press when relevant."
+            "Hybrid mode: funds-raised review is manual; check MCA filings and press when relevant.",
+            section="funds_raised",
         )
     ]
     defaults = [
         _finding(
-            "Hybrid mode: defaults / wilful defaulter screening is manual — verify via RBI / CIBIL portals."
+            "Hybrid mode: defaults / wilful defaulter screening is manual — verify via RBI / CIBIL portals.",
+            section="defaults",
         )
     ]
     litigations = [
         _finding(
             "Hybrid mode: eCourts / NCLT scraping deferred (CAPTCHA / paid APIs). "
-            "News scan may surface litigation hints only."
+            "News scan may surface litigation hints only.",
+            section="litigations",
         )
     ]
     statutory_compliance = [
         _finding(
-            "Hybrid mode: statutory compliance is limited to GST status in this release."
+            "Hybrid mode: statutory compliance is limited to GST status in this release.",
+            section="statutory_compliance",
         )
     ]
 
