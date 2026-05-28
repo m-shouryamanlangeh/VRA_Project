@@ -4,6 +4,21 @@
 
 /* Paytm VRA — layout helpers on top of Tailwind. */
 
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #b0c4d8;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #7a9bb5;
+}
+
 .nav-pill {
   padding: 0.35rem 0.85rem;
   border-radius: 9999px;

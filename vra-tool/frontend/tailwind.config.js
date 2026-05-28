@@ -6,6 +6,9 @@ export default {
       colors: {
         paytm: { blue: "#00BAF2", dark: "#002970", bg: "#F5F7FA" },
       },
+      fontFamily: {
+        sans: ["Geist", "Inter", "system-ui", "sans-serif"],
+      },
     },
   },
   plugins: [],
