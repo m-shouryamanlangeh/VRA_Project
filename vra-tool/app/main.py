@@ -65,6 +65,7 @@ _default_dev_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:8000",
     "http://localhost:8000",
+    "https://vra-backgroundverification.netlify.app",
 ]
 _env_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
 if _env_origins:
