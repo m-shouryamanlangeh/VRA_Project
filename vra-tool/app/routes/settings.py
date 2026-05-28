@@ -34,11 +34,13 @@ def _fernet_configured() -> bool:
 
 def _settings_state(db: Session) -> SettingsStateResponse:
     limit = int(get_value(db, "daily_quota_limit", "1500"))
+    # Include inactive keys too — the Settings UI shows them so the user can
+    # see which keys were auto-deactivated (e.g. on API_KEY_INVALID) and
+    # decide whether to reset or delete them.
     gemini_rows = list(
         db.execute(
             select(ApiKey).where(
                 ApiKey.provider == "gemini",
-                ApiKey.is_active.is_(True),
             )
         )
         .scalars()
@@ -149,3 +151,42 @@ async def api_settings_test(db: Session = Depends(get_db)) -> dict:
 async def settings_test_alias(db: Session = Depends(get_db)) -> dict:
     """Alias matching stakeholder path ``POST /settings/test``."""
     return await api_settings_test(db)
+
+
+@router.delete("/api/settings/keys/{key_id}")
+def api_settings_delete_key(key_id: int, db: Session = Depends(get_db)) -> dict:
+    """Hard-delete a stored Gemini key."""
+    row = db.get(ApiKey, key_id)
+    if row is None or row.provider != "gemini":
+        raise HTTPException(status_code=404, detail=f"Unknown key id {key_id}")
+    label = row.label
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted": label}
+
+
+@router.post("/api/settings/keys/reset")
+def api_settings_reset_keys(db: Session = Depends(get_db)) -> dict:
+    """Reactivate every Gemini key whose ``is_active`` flag is False.
+
+    Pair to the auto-deactivation that fires on persistent API_KEY_INVALID
+    (see ``app.core.vra_service._deactivate_bad_key``). After the user has
+    investigated / fixed the underlying issue (rotated quota, swapped a
+    bad key), this endpoint flips the flag back on so the rotation can
+    use the keys again.
+    """
+    rows = list(
+        db.execute(
+            select(ApiKey).where(
+                ApiKey.provider == "gemini",
+                ApiKey.is_active.is_(False),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for r in rows:
+        r.is_active = True
+        db.add(r)
+    db.commit()
+    return {"ok": True, "reactivated": [r.label for r in rows], "count": len(rows)}

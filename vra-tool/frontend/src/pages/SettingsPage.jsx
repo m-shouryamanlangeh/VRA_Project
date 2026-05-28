@@ -22,7 +22,7 @@ const MODEL_OPTIONS = [
   { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
 ];
 
-function KeyRow({ k, onStage, onUnstage }) {
+function KeyRow({ k, onStage, onUnstage, onDelete }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const masked = k.pendingSuffix
@@ -31,10 +31,33 @@ function KeyRow({ k, onStage, onUnstage }) {
 
   const meta = `${k.is_active ? "Active" : "Inactive"} · Usage today: ${k.usage_today ?? 0}/${k.daily_limit ?? 0}${k.quota_warning ? " ⚠️ over 80% of daily quota" : ""}`;
 
+  const rowClass =
+    "border rounded-lg p-4 space-y-2 " +
+    (k.is_active
+      ? "border-slate-100"
+      : "border-amber-200 bg-amber-50/40");
+
   return (
-    <div className="border border-slate-100 rounded-lg p-4 space-y-2">
-      <div className="text-xs font-semibold text-slate-500 uppercase">
-        {k.label || "Key"}
+    <div className={rowClass}>
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-semibold text-slate-500 uppercase">
+          {k.label || "Key"}
+          {!k.is_active && (
+            <span className="ml-2 text-amber-700 normal-case font-medium">
+              auto-deactivated — reset to retry
+            </span>
+          )}
+        </div>
+        {k.id !== null && (
+          <button
+            type="button"
+            onClick={() => onDelete(k)}
+            title="Permanently delete this key"
+            className="text-sm text-red-600 hover:text-red-700 font-medium"
+          >
+            🗑 Delete
+          </button>
+        )}
       </div>
       <div className="flex flex-wrap gap-2 items-center">
         <code className="flex-1 min-w-[200px] bg-slate-50 px-2 py-1 rounded text-sm">
@@ -186,6 +209,42 @@ export default function SettingsPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Save failed");
       showToast("Keys saved", true);
+      load();
+    } catch (err) {
+      showToast(err.message || String(err), false);
+    }
+  }
+
+  async function deleteKey(k) {
+    if (k.id == null) {
+      // Unsaved row — just drop it from local state.
+      setKeys((rows) => rows.filter((r) => r.uiId !== k.uiId));
+      return;
+    }
+    if (!window.confirm(`Permanently delete the "${k.label}" key? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/settings/keys/${k.id}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Delete failed");
+      showToast(`Deleted "${k.label}"`, true);
+      load();
+    } catch (err) {
+      showToast(err.message || String(err), false);
+    }
+  }
+
+  async function resetKeys() {
+    try {
+      const res = await apiFetch("/api/settings/keys/reset", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Reset failed");
+      if (data.count === 0) {
+        showToast("No inactive keys to reset", true);
+      } else {
+        showToast(`Reactivated ${data.count} key(s): ${(data.reactivated || []).join(", ")}`, true);
+      }
       load();
     } catch (err) {
       showToast(err.message || String(err), false);
