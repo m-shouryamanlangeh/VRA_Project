@@ -96,7 +96,13 @@ def _derive_dimension_score(findings: list[Any]) -> int:
         sev = str(f.get("severity") or "").upper()
         base = _SEVERITY_TO_SCORE.get(sev, 25)
         text = f.get("point") or f.get("summary") or ""
-        bumped = max(base, _score_for_finding_text(str(text)))
+        # Skip veto-marker text scan for explicit no-signal findings. Hybrid-mode
+        # placeholder text (e.g. "wilful defaulter screening is manual") describes
+        # what was NOT checked and would otherwise auto-trigger HIGH on clean vendors.
+        if sev in ("INFO", "NONE"):
+            bumped = base
+        else:
+            bumped = max(base, _score_for_finding_text(str(text)))
         best = max(best, bumped)
     return best
 
