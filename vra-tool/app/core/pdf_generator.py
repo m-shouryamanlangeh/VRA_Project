@@ -151,12 +151,16 @@ def _source_label(url: str) -> str:
 
 
 def _extract_risk_level(raw: str) -> str:
-    """Extract a clean HIGH / MEDIUM / LOW token from any risk_rating text Gemini returns."""
+    """Extract a clean HIGH / MEDIUM / LOW token from any risk_rating text Gemini returns.
+
+    Returns the FIRST standalone HIGH/MEDIUM/LOW token in the string. Plain
+    substring matching would incorrectly resolve "LOW (no HIGH-severity
+    findings)" to HIGH; taking the first occurrence preserves the intended
+    rating and treats trailing rationale text as decoration.
+    """
     u = str(raw or "").upper()
-    for level in ("HIGH", "MEDIUM", "LOW"):
-        if level in u:
-            return level
-    return "UNKNOWN"
+    m = re.search(r"\b(HIGH|MEDIUM|LOW)\b", u)
+    return m.group(1) if m else "UNKNOWN"
 
 
 def _report_section_map(report: VRAReport) -> list[tuple[str, list]]:
@@ -357,11 +361,10 @@ def render_vra_pdf(report: VRAReport, seq: int, vendor_display_name: str) -> Pat
     )
     rr = _extract_risk_level(str(rr_raw))  # always HIGH / MEDIUM / LOW / UNKNOWN
 
-    # Override: REJECT vendor must never show below HIGH; PROCEED vendor capped at MEDIUM.
-    if report.recommendation == "REJECT" and rr != "HIGH":
-        rr = "HIGH"
-    elif report.recommendation == "PROCEED" and rr == "HIGH":
-        rr = "MEDIUM"
+    # Do NOT re-derive the badge from `recommendation` here. _ensure_calibrated_rubric
+    # in report_normalization.py is the single source of truth for the
+    # rating ↔ recommendation mapping; overriding the badge again at render
+    # time produces silent disagreement between the PDF and the JSON response.
 
     badge_bg, badge_fg = _risk_badge_color(rr)
     badge_tbl = Table(

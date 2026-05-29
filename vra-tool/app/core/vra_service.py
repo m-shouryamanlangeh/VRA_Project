@@ -30,7 +30,7 @@ from app.core import quota
 from app.core.report_normalization import _ensure_calibrated_rubric, normalize_legacy_vra_payload
 from app.core.validator import validate_report_async
 from app.models import ApiKey, AuditLog
-from app.schemas import AdversePassResult, SynthesisResult, VRAReport
+from app.schemas import GST_RE, AdversePassResult, Finding, SynthesisResult, VRAReport
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +123,26 @@ VRA_MAIN_JSON_TAIL = (
     "Mitigants: no sanctions/wilful-default exposure, directors clean across MCA disqualified\n"
     "list. Recommendation: CONDITIONAL pending counsel review of DRT-Mumbai OA-1234/2024.\"\n"
     "\n\nADDITIONAL CRITICAL INSTRUCTIONS:\n"
-    "2. Every one of the 10 detailed section arrays (company_profile, management, credit_ratings, "
+    "2. For every one of the 10 detailed section arrays (company_profile, management, credit_ratings, "
     "financial_soundness, borrowings, funds_raised, mca_filings, defaults, litigations, "
-    "statutory_compliance) MUST contain at least 3-5 concrete, specific findings for this vendor. "
-    "Each finding must be a full sentence describing a verifiable fact, observation, or 'no public "
-    "record found' conclusion — not a one-line label. Do NOT leave any array empty or return [].\n"
+    "statutory_compliance) you MUST perform real web search and report what the search actually returns. "
+    "Specifically: \n"
+    "   • If your search returns real public-record material about the vendor (regulatory orders, "
+    "news coverage, court cases, sanctions hits, etc.) you MUST include those findings — each as a "
+    "specific, verifiable statement with the actual deep-link URL from the source (NOT a portal root). "
+    "Do not omit known material public information about a well-known entity simply because it is "
+    "easier to write 'no record found'. Omitting known public adverse information is a compliance "
+    "failure equal in weight to fabricating findings.\n"
+    "   • Aim for 3-5 substantive findings per section when real material exists. \n"
+    "   • If — and only if — the search genuinely returns nothing material for that section, return a "
+    "single 'no record found' statement with severity INFO citing the relevant authoritative portal "
+    "root (e.g. 'No wilful defaulter listings for [vendor] found on RBI / CIBIL / WatchOutInvestors "
+    "portals as of [date]', severity=INFO, source=rbi.org.in). \n"
+    "   • DO NOT fabricate specific events, renames, partnerships, regulatory actions, FIRs, or "
+    "investigations. Every specific claim MUST be traceable to a real search result you can cite. "
+    "Fabrication is a compliance failure.\n"
+    "   • DO NOT pad with filler bullets to reach a count. Three real findings is better than five "
+    "with two fabricated ones.\n"
     "3. Each finding MUST include a real HTTPS source URL from authoritative portals. "
     "Generic placeholders like 'https://example.com' are strictly forbidden. "
     "Preferred sources by section — company_profile/management/mca_filings: mca.gov.in; "
@@ -149,7 +164,8 @@ VRA_MAIN_JSON_TAIL = (
     "Do NOT simply list board composition or DIN numbers from MCA records.\n"
     "6. adverse_media and fraud_aml: include at least one entry each. If nothing adverse is found, "
     "state 'No adverse records found for [vendor name] in open-source search as of [date]' "
-    "with severity LOW and a Google News search hyperlink.\n"
+    "with severity INFO (NOT LOW — a clean no-signal result should not contribute to the risk "
+    "score) and a Google News search hyperlink.\n"
     "7. All findings must be based on what you actually find through internet search. "
     "Never reproduce static registry data as a finding. Never fabricate citations.\n"
 )
@@ -421,6 +437,57 @@ async def generate_vra_bundle(
         # PDF always shows the calibrated scorecard even when the LLM omitted it
         # or when the hybrid path skipped normalize_legacy_vra_payload.
         _final = report.model_dump()
+
+        # No-GSTIN safeguard (applies to BOTH hybrid and legacy paths). Without a
+        # verified GSTIN, name-only OSINT can pull findings about related legal
+        # entities sharing the trade name (e.g. searching "PAYTM" surfaces One97
+        # Communications Ltd and Paytm Payments Bank Ltd, distinct legal persons).
+        # Persist a flag so the calibrated rubric refuses to promote the rating
+        # back to HIGH, and surface an explicit entity-scope warning at the top of
+        # company_profile so reviewers see the caveat before any finding.
+        gstin_ok = bool(GST_RE.match(str(gst or "").strip().upper()))
+        if not gstin_ok:
+            es = _final.get("executive_summary")
+            if not isinstance(es, dict):
+                es = {}
+                _final["executive_summary"] = es
+            es["_capped_no_gstin"] = True
+            es["entity_scope_warning"] = (
+                "Findings derived from name-only OSINT; specific legal entity not verified."
+            )
+            # If the LLM already labelled the case HIGH, fold to MEDIUM up front so
+            # the rubric's promotion guard sees a MEDIUM baseline.
+            rr = str(es.get("risk_rating") or es.get("risk_level") or "").upper()
+            if rr == "HIGH":
+                es["risk_rating"] = "MEDIUM"
+                es["risk_level"] = "MEDIUM"
+                logger.info(
+                    "No-GSTIN cap (post-process): risk_rating HIGH→MEDIUM for vendor=%s",
+                    vendor_name,
+                )
+
+            warning_text = (
+                "ENTITY SCOPE WARNING: No GSTIN supplied. Findings below may concern "
+                "related legal entities sharing the trade name (e.g. holding company, "
+                "payments bank subsidiary, group affiliates). Verify the exact legal "
+                "entity on https://services.gst.gov.in/services/searchgstin or "
+                "https://www.mca.gov.in/ before relying on any conclusion."
+            )
+            cp = _final.get("company_profile") or []
+            if not any(
+                isinstance(r, dict) and "ENTITY SCOPE WARNING" in str(r.get("point") or "")
+                for r in cp
+            ):
+                cp.insert(
+                    0,
+                    Finding(
+                        point=warning_text,
+                        source="https://services.gst.gov.in/services/searchgstin",
+                        severity="MEDIUM",  # type: ignore[arg-type]
+                    ).model_dump(),
+                )
+                _final["company_profile"] = cp
+
         _ensure_calibrated_rubric(_final)
         report = VRAReport.model_validate(_final)
 

@@ -19,9 +19,10 @@ _URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Well-known canonical portals that are always valid reference points even if
-# they block automated HEAD/GET requests.  Skip reachability probes for these.
-_TRUSTED_DOMAINS: frozenset[str] = frozenset({
+# Canonical static portals (govt / regulatory / ratings / sanctions / kanoon).
+# These often block automated HEAD/GET requests but their root URLs are still
+# valid reference points. Reachability probes are skipped for them.
+_TRUSTED_STATIC_PORTALS: frozenset[str] = frozenset({
     # ── Govt / Regulatory ─────────────────────────────────────────────────
     "mca.gov.in",
     "gst.gov.in",
@@ -55,7 +56,7 @@ _TRUSTED_DOMAINS: frozenset[str] = frozenset({
     "delhipolice.ncog.gov.in",
     "delhihighcourt.nic.in",
     "allahabadhighcourt.in",
-    # ── Credit / Financial ────────────────────────────────────────────────
+    # ── Credit / Financial portals ────────────────────────────────────────
     "crisil.com",
     "icra.in",
     "careratings.com",
@@ -77,8 +78,15 @@ _TRUSTED_DOMAINS: frozenset[str] = frozenset({
     "offshoreleaks.icij.org",
     "aleph.occrp.org",
     "transparency.org",
-    "stockmaniacs.net",
-    # ── Indian News & Media ───────────────────────────────────────────────
+    "indiankanoon.org",
+})
+
+# News / media domains. Article URLs ARE deep links — when an LLM hallucinates
+# a citation slug, the URL 404s. Therefore reachability MUST be checked for
+# these (do NOT bypass HEAD). Hosts here are still considered "known" so
+# `_known_news_host` can short-circuit unrelated checks, but the
+# `_is_trusted_domain` reachability bypass does NOT apply.
+_KNOWN_NEWS_DOMAINS: frozenset[str] = frozenset({
     "economictimes.indiatimes.com",
     "timesofindia.indiatimes.com",
     "livemint.com",
@@ -109,26 +117,39 @@ _TRUSTED_DOMAINS: frozenset[str] = frozenset({
     "wionews.com",
     "the420.in",
     "consumercomplaints.in",
-    # ── Global / Wire ─────────────────────────────────────────────────────
     "business-standard.com",
     "reuters.com",
     "bloomberg.com",
-    "google.com",
-    "indiankanoon.org",
+    "stockmaniacs.net",
 })
 
+# Back-compat alias. Anything that used to read `_TRUSTED_DOMAINS` for
+# membership testing now sees the union; the reachability-bypass logic uses
+# `_is_trusted_domain` which is restricted to static portals only.
+_TRUSTED_DOMAINS: frozenset[str] = _TRUSTED_STATIC_PORTALS | _KNOWN_NEWS_DOMAINS
 
-def _is_trusted_domain(url: str) -> bool:
-    """Return True if the URL's host is in the trusted-domain whitelist."""
+
+def _domain_of(url: str) -> str:
+    """Lowercased netloc with leading 'www.' stripped, or '' on parse failure."""
     try:
         host = urllib.parse.urlparse(url).netloc.lower()
         if host.startswith("www."):
             host = host[4:]
-        return host in _TRUSTED_DOMAINS or any(
-            host.endswith("." + d) for d in _TRUSTED_DOMAINS
-        )
+        return host
     except Exception:
+        return ""
+
+
+def _is_trusted_domain(url: str) -> bool:
+    """Return True if URL host is a static portal whose reachability we trust
+    even when probes fail. News domains are deliberately excluded so that
+    hallucinated article slugs (404s) get caught and replaced."""
+    host = _domain_of(url)
+    if not host:
         return False
+    return host in _TRUSTED_STATIC_PORTALS or any(
+        host.endswith("." + d) for d in _TRUSTED_STATIC_PORTALS
+    )
 
 
 # Canonical fallback source per section when LLM provides a bad/missing URL.
@@ -174,16 +195,22 @@ def _rescue_finding(
     vendor_name: str = "",
     reason: str = "missing",
 ) -> Finding:
-    """Replace bad source URL with a vendor-scoped search link.
-
-    Only appends a transparency note when the URL was truly absent or malformed
-    (reason='missing').  Unreachable-but-plausible URLs (reason='unreachable')
-    are silently swapped so the report stays clean.
+    """Replace bad source URL with a vendor-scoped search link, leaving a
+    transparency note on the finding so a reviewer can see the citation was
+    not actually verifiable. Silently swapping an unreachable URL for a search
+    link (the prior behavior) made hallucinated article slugs invisible in
+    the final report.
     """
     fallback = _fallback_osint_search_url(vendor_name, section)
     point = (f.point or "").rstrip()
-    if reason == "missing" and "original source URL was missing or invalid" not in point:
-        point = point + " [Verify manually: original source URL was missing or invalid.]"
+    notes = {
+        "missing": "[Verify manually: original source URL was missing or invalid.]",
+        "unreachable": "[Verify manually: original source URL was unreachable / returned an error.]",
+        "unverified": "[Verify manually: original source URL could not be validated.]",
+    }
+    note = notes.get(reason, notes["missing"])
+    if "[Verify manually:" not in point:
+        point = (point + " " + note).strip()
     return f.model_copy(update={"source": fallback, "point": point})
 
 
