@@ -87,7 +87,7 @@ class NewsCollector(BaseCollector):
             "Accept": "application/rss+xml, application/xml, text/xml, */*",
         }
         try:
-            async with httpx.AsyncClient(timeout=NEWS_TIMEOUT_S, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=NEWS_TIMEOUT_S, follow_redirects=True, verify=False) as client:
                 resp = await client.get(rss_url, headers=headers)
         except Exception as exc:
             ms = int((time.monotonic() - t0) * 1000)

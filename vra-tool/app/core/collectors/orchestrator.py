@@ -11,6 +11,7 @@ from app.core.collectors.base import BaseCollector, CollectorResult
 from app.core.collectors.gst_lookup import GstLookup
 from app.core.collectors.mca_collector import McaCollector
 from app.core.collectors.news_collector import NewsCollector
+from app.core.collectors.web_search_collector import WebSearchCollector
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class EvidencePack:
     gst_data: dict[str, Any] | None
     mca_data: dict[str, Any] | None
     news_headlines: list[dict[str, Any]]
+    web_search_results: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     news_meta: dict[str, Any] = field(default_factory=dict)
     collector_status: dict[str, str] = field(default_factory=dict)
     collector_errors: dict[str, list[str]] = field(default_factory=dict)
@@ -49,6 +51,7 @@ async def gather_evidence(vendor_name: str, gst: str, org_type: str) -> Evidence
         GstLookup(),
         McaCollector(),
         NewsCollector(),
+        WebSearchCollector(),
     ]
     results = await asyncio.gather(
         *(c.collect(vendor_name, gst, org_type) for c in collectors),
@@ -79,6 +82,15 @@ async def gather_evidence(vendor_name: str, gst: str, org_type: str) -> Evidence
             k: v for k, v in nd.items() if k != "headlines"
         }
 
+    web_search_results: dict[str, list[dict[str, str]]] = {}
+    wd = by_name.get("web_search") and by_name["web_search"].data
+    if isinstance(wd, dict):
+        web_search_results = wd.get("results_by_dimension") or {}
+        logger.info(
+            "WebSearch collected %d total snippets",
+            wd.get("total_snippets", 0),
+        )
+
     collector_status = {k: v.status for k, v in by_name.items()}
     collector_errors = {k: list(v.errors) for k, v in by_name.items() if v.errors}
 
@@ -92,6 +104,7 @@ async def gather_evidence(vendor_name: str, gst: str, org_type: str) -> Evidence
         gst_data=gst_data,
         mca_data=mca_data,
         news_headlines=news_headlines,
+        web_search_results=web_search_results,
         news_meta=news_meta,
         collector_status=collector_status,
         collector_errors=collector_errors,

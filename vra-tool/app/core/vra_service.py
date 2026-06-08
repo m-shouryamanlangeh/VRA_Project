@@ -12,12 +12,8 @@ from sqlalchemy.orm import Session
 from app.config import settings as app_settings
 from app.core.crypto import decrypt_secret
 from app.core.kv_store import get_value, next_pdf_sequence, set_value
-from app.core.llm.gemini import (
-    GeminiProvider,
-    is_permanent_invalid_key_error,
-    is_retryable_with_fallback,
-    resolve_model_candidates,
-)
+from app.core.llm.gemini import GeminiProvider, is_retryable_with_fallback, resolve_model_candidates
+from app.core.llm.openrouter import OpenRouterProvider
 from app.core.pdf_generator import render_vra_pdf
 from app.core.collectors import gather_evidence
 from app.core.hybrid_report import build_vra_report
@@ -25,12 +21,13 @@ from app.core.prompts import (
     format_adverse_media_prompt,
     format_synthesis_prompt,
     format_vra_full_prompt,
+    format_vra_knowledge_prompt,
 )
 from app.core import quota
 from app.core.report_normalization import _ensure_calibrated_rubric, normalize_legacy_vra_payload
 from app.core.validator import validate_report_async
 from app.models import ApiKey, AuditLog
-from app.schemas import GST_RE, AdversePassResult, Finding, SynthesisResult, VRAReport
+from app.schemas import AdversePassResult, SynthesisResult, VRAReport
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +92,11 @@ VRA_MAIN_JSON_TAIL = (
     "evidence quality:\n"
     "  • HIGH   = GSTIN/CIN/PAN cited in ≥2 independent sources; clear identity confirmed\n"
     "  • MEDIUM = legal name match in ≥2 credible portals/news; identifiers partial\n"
-    "  • LOW    = sparse public footprint OR only name overlap with no identifier match\n\n"
+    "  • LOW    = sparse public footprint OR only name overlap with no identifier match\n"
+    "             OR you have no training knowledge about this specific vendor\n"
+    "  IMPORTANT: If you are working from training knowledge only (no live search) and\n"
+    "  this vendor is not a nationally prominent company, default to LOW confidence.\n"
+    "  Small private companies with no public footprint = LOW confidence.\n\n"
     "STEP 6 — Recommendation mapping (use this exactly):\n"
     "  • LOW    + HIGH/MEDIUM confidence → PROCEED\n"
     "  • MEDIUM + any confidence         → CONDITIONAL\n"
@@ -123,26 +124,11 @@ VRA_MAIN_JSON_TAIL = (
     "Mitigants: no sanctions/wilful-default exposure, directors clean across MCA disqualified\n"
     "list. Recommendation: CONDITIONAL pending counsel review of DRT-Mumbai OA-1234/2024.\"\n"
     "\n\nADDITIONAL CRITICAL INSTRUCTIONS:\n"
-    "2. For every one of the 10 detailed section arrays (company_profile, management, credit_ratings, "
+    "2. Every one of the 10 detailed section arrays (company_profile, management, credit_ratings, "
     "financial_soundness, borrowings, funds_raised, mca_filings, defaults, litigations, "
-    "statutory_compliance) you MUST perform real web search and report what the search actually returns. "
-    "Specifically: \n"
-    "   • If your search returns real public-record material about the vendor (regulatory orders, "
-    "news coverage, court cases, sanctions hits, etc.) you MUST include those findings — each as a "
-    "specific, verifiable statement with the actual deep-link URL from the source (NOT a portal root). "
-    "Do not omit known material public information about a well-known entity simply because it is "
-    "easier to write 'no record found'. Omitting known public adverse information is a compliance "
-    "failure equal in weight to fabricating findings.\n"
-    "   • Aim for 3-5 substantive findings per section when real material exists. \n"
-    "   • If — and only if — the search genuinely returns nothing material for that section, return a "
-    "single 'no record found' statement with severity INFO citing the relevant authoritative portal "
-    "root (e.g. 'No wilful defaulter listings for [vendor] found on RBI / CIBIL / WatchOutInvestors "
-    "portals as of [date]', severity=INFO, source=rbi.org.in). \n"
-    "   • DO NOT fabricate specific events, renames, partnerships, regulatory actions, FIRs, or "
-    "investigations. Every specific claim MUST be traceable to a real search result you can cite. "
-    "Fabrication is a compliance failure.\n"
-    "   • DO NOT pad with filler bullets to reach a count. Three real findings is better than five "
-    "with two fabricated ones.\n"
+    "statutory_compliance) MUST contain at least 3-5 concrete, specific findings for this vendor. "
+    "Each finding must be a full sentence describing a verifiable fact, observation, or 'no public "
+    "record found' conclusion — not a one-line label. Do NOT leave any array empty or return [].\n"
     "3. Each finding MUST include a real HTTPS source URL from authoritative portals. "
     "Generic placeholders like 'https://example.com' are strictly forbidden. "
     "Preferred sources by section — company_profile/management/mca_filings: mca.gov.in; "
@@ -164,8 +150,7 @@ VRA_MAIN_JSON_TAIL = (
     "Do NOT simply list board composition or DIN numbers from MCA records.\n"
     "6. adverse_media and fraud_aml: include at least one entry each. If nothing adverse is found, "
     "state 'No adverse records found for [vendor name] in open-source search as of [date]' "
-    "with severity INFO (NOT LOW — a clean no-signal result should not contribute to the risk "
-    "score) and a Google News search hyperlink.\n"
+    "with severity LOW and a Google News search hyperlink.\n"
     "7. All findings must be based on what you actually find through internet search. "
     "Never reproduce static registry data as a finding. Never fabricate citations.\n"
 )
@@ -178,12 +163,16 @@ _VENDOR_SCOPE_NOTE = (
     "If a search result is not clearly about this exact vendor, do NOT include it.\n"
 )
 
+# ---------------------------------------------------------------------------
+# Key management helpers
+# ---------------------------------------------------------------------------
 
-def _ordered_gemini_keys(db: Session) -> list[ApiKey]:
+def _ordered_provider_keys(db: Session, provider: str) -> list[ApiKey]:
+    """Return active API key rows for *provider* sorted primary → fallback → other."""
     rows = list(
         db.execute(
             select(ApiKey).where(
-                ApiKey.provider == "gemini",
+                ApiKey.provider == provider,
                 ApiKey.is_active.is_(True),
             )
         )
@@ -202,8 +191,12 @@ def _ordered_gemini_keys(db: Session) -> list[ApiKey]:
     return sorted(rows, key=sort_key)
 
 
+def _ordered_gemini_keys(db: Session) -> list[ApiKey]:
+    return _ordered_provider_keys(db, "gemini")
+
+
 def build_gemini_key_candidates(db: Session) -> list[tuple[ApiKey | None, str, str]]:
-    """(db_row_or_none, plaintext_secret, label) in retry order."""
+    """(db_row_or_none, plaintext_secret, label) in retry order — Gemini keys only."""
     out: list[tuple[ApiKey | None, str, str]] = []
     for row in _ordered_gemini_keys(db):
         try:
@@ -217,6 +210,36 @@ def build_gemini_key_candidates(db: Session) -> list[tuple[ApiKey | None, str, s
         out.append((None, env_key, "ENV"))
     return out
 
+
+def build_openrouter_key_candidates(db: Session) -> list[tuple[ApiKey | None, str, str]]:
+    """(db_row_or_none, plaintext_secret, label) in retry order — OpenRouter keys only."""
+    out: list[tuple[ApiKey | None, str, str]] = []
+    for row in _ordered_provider_keys(db, "openrouter"):
+        try:
+            plain = decrypt_secret(row.encrypted_key)
+        except Exception as exc:
+            logger.warning("Skipping OpenRouter key id=%s: %s", row.id, exc)
+            continue
+        out.append((row, plain, row.label))
+    # Support env fallback for OpenRouter too
+    env_key = (getattr(app_settings, "OPENROUTER_API_KEY", None) or "").strip()
+    if not out and env_key:
+        out.append((None, env_key, "ENV"))
+    return out
+
+
+def build_key_candidates(
+    db: Session, provider: str
+) -> list[tuple[ApiKey | None, str, str]]:
+    """Dispatch to the right candidate builder by provider name."""
+    if provider == "openrouter":
+        return build_openrouter_key_candidates(db)
+    return build_gemini_key_candidates(db)
+
+
+# ---------------------------------------------------------------------------
+# Report helpers
+# ---------------------------------------------------------------------------
 
 def _ensure_vendor(report: VRAReport, vendor_name: str, gst: str, org_type: str) -> VRAReport:
     data = report.model_dump()
@@ -245,25 +268,9 @@ def _merge_adverse(report: VRAReport, adverse: AdversePassResult) -> VRAReport:
     return VRAReport.model_validate(data)
 
 
-def _deactivate_bad_key(row_id: int) -> None:
-    """Mark a key inactive in its own short transaction so the change survives
-    even if the outer /generate flow rolls back."""
-    from app.database import SessionLocal
-
-    sess = SessionLocal()
-    try:
-        bad = sess.get(ApiKey, row_id)
-        if bad is not None and bad.is_active:
-            bad.is_active = False
-            sess.add(bad)
-            sess.commit()
-            logger.warning("Auto-deactivated invalid Gemini key id=%s label=%s", bad.id, bad.label)
-    except Exception as exc:
-        logger.warning("Failed to auto-deactivate key id=%s: %s", row_id, exc)
-        sess.rollback()
-    finally:
-        sess.close()
-
+# ---------------------------------------------------------------------------
+# LLM invocation — provider-agnostic
+# ---------------------------------------------------------------------------
 
 async def _run_gemini_attempts(
     db: Session,
@@ -276,10 +283,9 @@ async def _run_gemini_attempts(
     schema: Any,
     use_search: bool = True,
 ) -> tuple[dict[str, Any], ApiKey | None, str, int]:
-    """Try each key × each model fallback until success or non-retryable error."""
+    """Try each key × each Gemini model fallback until success."""
     total_tokens = 0
     last_error: BaseException | None = None
-    invalid_key_count = 0
     _, first_secret, _ = candidates[0]
     models_to_try = await resolve_model_candidates(model, first_secret)
     for try_model in models_to_try:
@@ -302,15 +308,6 @@ async def _run_gemini_attempts(
                 return out, row, label, total_tokens
             except Exception as exc:
                 last_error = exc
-                if is_permanent_invalid_key_error(exc):
-                    invalid_key_count += 1
-                    if row is not None:
-                        _deactivate_bad_key(row.id)
-                    logger.warning(
-                        "Gemini key %s rejected as invalid; deactivated. Continuing.",
-                        label,
-                    )
-                    continue
                 if is_retryable_with_fallback(exc):
                     logger.warning(
                         "Gemini failed (key=%s, model=%s), trying next: %s",
@@ -318,15 +315,134 @@ async def _run_gemini_attempts(
                     )
                     continue
                 raise
-    if invalid_key_count and invalid_key_count == len(candidates):
-        raise ValueError(
-            "All Gemini API keys are invalid. Add a working key in Settings → API Keys "
-            "(get one from https://aistudio.google.com/apikey)."
-        )
     if last_error:
         raise last_error
     raise RuntimeError("No Gemini API keys configured")
 
+
+# Free model fallback chain — tried in order when the configured model is rate-limited.
+# Only free models; skip paid ones so there's no surprise charge.
+_FREE_MODEL_FALLBACKS = [
+    "openai/gpt-oss-120b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-4-31b-it:free",
+    "openai/gpt-oss-20b:free",
+]
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return "429" in s or "rate limit" in s or "rate-limit" in s or "quota" in s or "temporarily" in s
+
+
+async def _run_openrouter_attempts(
+    db: Session,
+    candidates: list[tuple[ApiKey | None, str, str]],
+    *,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    prompt: str,
+    schema: Any,
+    use_search: bool = True,
+) -> tuple[dict[str, Any], ApiKey | None, str, int]:
+    """
+    Try each OpenRouter key × model in order until success.
+
+    When the configured model is rate-limited (429), automatically rotates
+    through FREE_MODEL_FALLBACKS so free-tier users don't hit a dead end.
+    """
+    total_tokens = 0
+    last_error: BaseException | None = None
+
+    # Build full model list: configured model first, then fallbacks (deduplicated)
+    models_to_try = [model] + [m for m in _FREE_MODEL_FALLBACKS if m != model]
+
+    for try_model in models_to_try:
+        for row, secret, label in candidates:
+            prov = OpenRouterProvider(
+                secret,
+                model=try_model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
+            try:
+                out = await prov.generate(prompt, schema, use_search=use_search)
+                total_tokens += prov.last_total_token_count or 0
+                if try_model != model:
+                    logger.info(
+                        "OpenRouter: used fallback model %s (configured: %s)", try_model, model
+                    )
+                if row is not None:
+                    row.last_used_at = dt.datetime.utcnow()
+                    quota.increment_usage(db, row.id, 1)
+                    db.add(row)
+                return out, row, label, total_tokens
+            except Exception as exc:
+                last_error = exc
+                if _is_rate_limit_error(exc):
+                    logger.warning(
+                        "OpenRouter rate-limited (key=%s, model=%s) — trying next: %s",
+                        label, try_model, exc,
+                    )
+                    continue  # try next key, then next model
+                raise  # non-rate-limit error → propagate immediately
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("No OpenRouter API keys configured")
+
+
+async def _run_llm_attempts(
+    db: Session,
+    provider: str,
+    candidates: list[tuple[ApiKey | None, str, str]],
+    *,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    prompt: str,
+    schema: Any,
+    use_search: bool = True,
+) -> tuple[dict[str, Any], ApiKey | None, str, int]:
+    """Provider-agnostic dispatcher."""
+    if provider == "openrouter":
+        return await _run_openrouter_attempts(
+            db, candidates,
+            model=model,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            prompt=prompt,
+            schema=schema,
+            use_search=use_search,
+        )
+    # Default: Gemini
+    return await _run_gemini_attempts(
+        db, candidates,
+        model=model,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        prompt=prompt,
+        schema=schema,
+        use_search=use_search,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Default model per provider
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MODEL: dict[str, str] = {
+    "gemini": "gemini-2.5-flash",
+    # gpt-oss-120b is 120B — strong knowledge, currently available free tier.
+    # System auto-falls back to llama-3.3-70b → gemma-4-31b → gpt-oss-20b if rate-limited.
+    "openrouter": "openai/gpt-oss-120b:free",
+}
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
 
 async def generate_vra_bundle(
     db: Session,
@@ -344,14 +460,18 @@ async def generate_vra_bundle(
     Returns:
         Tuple of (report, relative PDF path ``output/...``, audit ORM object).
     """
-    candidates = build_gemini_key_candidates(db)
+    provider = (get_value(db, "llm_provider", "gemini") or "gemini").strip().lower()
+    candidates = build_key_candidates(db, provider)
+
     if not candidates:
+        provider_display = provider.capitalize()
         raise ValueError(
-            "No Gemini API keys configured. Add a Primary key in Settings "
-            "or set GEMINI_API_KEY in the environment for bootstrap."
+            f"No {provider_display} API keys configured. "
+            f"Add a Primary key in Settings under the '{provider_display}' provider."
         )
 
-    model = get_value(db, "llm_model", "gemini-2.5-flash")
+    default_model = _DEFAULT_MODEL.get(provider, "gemini-2.5-flash")
+    model = get_value(db, "llm_model", default_model)
     temperature = float(get_value(db, "llm_temperature", "0.2"))
     max_output_tokens = int(get_value(db, "llm_max_output_tokens", "16384"))
 
@@ -360,27 +480,79 @@ async def generate_vra_bundle(
 
         if app_settings.USE_HYBRID_MODE:
             evidence = await gather_evidence(vendor_name, gst, org_type)
-            synthesis_prompt = format_synthesis_prompt(vendor_name, gst, org_type, evidence)
-            synthesis_raw, _row1, label1, tok1 = await _run_gemini_attempts(
-                db,
-                candidates,
-                model=model,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                prompt=synthesis_prompt,
-                schema=SynthesisResult,
-                use_search=False,
+            total_web_snippets = sum(
+                len(v) for v in (evidence.web_search_results or {}).values()
             )
-            report = build_vra_report(
-                evidence,
-                SynthesisResult.model_validate(synthesis_raw),
-                date_str=date_str,
-            )
-            report = _ensure_vendor(report, vendor_name, gst, org_type)
-            tok2 = 0
+            # Only fall back to pure knowledge mode when web search returned ZERO results.
+            # Even 1–4 snippets are passed through the synthesis path so real findings
+            # (e.g. NCLT case snippets, Scribd loan-default docs) are not discarded.
+            evidence_is_sparse = total_web_snippets == 0
+
+            if evidence_is_sparse:
+                logger.warning(
+                    "Web search returned 0 snippets — falling back to LLM-knowledge mode",
+                )
+            elif total_web_snippets < 10:
+                logger.warning(
+                    "Web search returned only %d snippets — synthesis may be incomplete",
+                    total_web_snippets,
+                )
+
+            if evidence_is_sparse and provider == "openrouter":
+                # OpenRouter free models have no live search plugin.
+                # Use the knowledge-mode prompt: asks the model to reason from
+                # training data instead of pretending to search the internet.
+                main_token_cap = max(max_output_tokens, 16384)
+                vendor_scope = _VENDOR_SCOPE_NOTE.format(vendor_name=vendor_name, gst=gst)
+                main_prompt = (
+                    format_vra_knowledge_prompt(vendor_name, gst, org_type, date_str)
+                    + VRA_MAIN_JSON_TAIL
+                    + vendor_scope
+                )
+                main_raw, _row1, label1, tok1 = await _run_llm_attempts(
+                    db,
+                    provider,
+                    candidates,
+                    model=model,
+                    temperature=temperature,
+                    max_output_tokens=main_token_cap,
+                    prompt=main_prompt,
+                    schema=VRAReport,
+                    use_search=False,
+                )
+                main_raw = normalize_legacy_vra_payload(
+                    main_raw,
+                    date_str=date_str,
+                    vendor_name=vendor_name,
+                    gst=gst,
+                    org_type=org_type,
+                )
+                report = _ensure_vendor(VRAReport.model_validate(main_raw), vendor_name, gst, org_type)
+                tok2 = 0
+            else:
+                # Hybrid path: evidence pack + optional LLM search grounding (Gemini)
+                synthesis_prompt = format_synthesis_prompt(vendor_name, gst, org_type, evidence)
+                synthesis_raw, _row1, label1, tok1 = await _run_llm_attempts(
+                    db,
+                    provider,
+                    candidates,
+                    model=model,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    prompt=synthesis_prompt,
+                    schema=SynthesisResult,
+                    use_search=evidence_is_sparse,  # enable Gemini grounding when evidence sparse
+                )
+                report = build_vra_report(
+                    evidence,
+                    SynthesisResult.model_validate(synthesis_raw),
+                    date_str=date_str,
+                )
+                report = _ensure_vendor(report, vendor_name, gst, org_type)
+                tok2 = 0
         else:
-            # Legacy path uses Google Search (no API JSON mode) and a very large root schema;
-            # sub-16k limits often truncate mid-JSON and break parsing.
+            # Legacy path: send everything to the LLM with search enabled.
+            # Sub-16k limits often truncate mid-JSON, so enforce a minimum cap.
             main_token_cap = max(max_output_tokens, 16384)
             vendor_scope = _VENDOR_SCOPE_NOTE.format(vendor_name=vendor_name, gst=gst)
             main_prompt = (
@@ -394,8 +566,9 @@ async def generate_vra_bundle(
                 + vendor_scope
             )
 
-            main_raw, _row1, label1, tok1 = await _run_gemini_attempts(
+            main_raw, _row1, label1, tok1 = await _run_llm_attempts(
                 db,
+                provider,
                 candidates,
                 model=model,
                 temperature=temperature,
@@ -414,8 +587,9 @@ async def generate_vra_bundle(
 
             tok2 = 0
             try:
-                adverse_raw, _row2, _lbl2, tok2 = await _run_gemini_attempts(
+                adverse_raw, _row2, _lbl2, tok2 = await _run_llm_attempts(
                     db,
+                    provider,
                     candidates,
                     model=model,
                     temperature=temperature,
@@ -432,62 +606,9 @@ async def generate_vra_bundle(
 
         report = await validate_report_async(report, verify_urls=verify_urls)
 
-        # Final rubric pass — after adverse-media merge and URL cleanup, recompute
-        # dimension_scores / risk_score / rating from the final findings set so the
-        # PDF always shows the calibrated scorecard even when the LLM omitted it
-        # or when the hybrid path skipped normalize_legacy_vra_payload.
+        # Final rubric pass — recompute dimension_scores / risk_score / rating from
+        # the final findings set so the PDF always shows a calibrated scorecard.
         _final = report.model_dump()
-
-        # No-GSTIN safeguard (applies to BOTH hybrid and legacy paths). Without a
-        # verified GSTIN, name-only OSINT can pull findings about related legal
-        # entities sharing the trade name (e.g. searching "PAYTM" surfaces One97
-        # Communications Ltd and Paytm Payments Bank Ltd, distinct legal persons).
-        # Persist a flag so the calibrated rubric refuses to promote the rating
-        # back to HIGH, and surface an explicit entity-scope warning at the top of
-        # company_profile so reviewers see the caveat before any finding.
-        gstin_ok = bool(GST_RE.match(str(gst or "").strip().upper()))
-        if not gstin_ok:
-            es = _final.get("executive_summary")
-            if not isinstance(es, dict):
-                es = {}
-                _final["executive_summary"] = es
-            es["_capped_no_gstin"] = True
-            es["entity_scope_warning"] = (
-                "Findings derived from name-only OSINT; specific legal entity not verified."
-            )
-            # If the LLM already labelled the case HIGH, fold to MEDIUM up front so
-            # the rubric's promotion guard sees a MEDIUM baseline.
-            rr = str(es.get("risk_rating") or es.get("risk_level") or "").upper()
-            if rr == "HIGH":
-                es["risk_rating"] = "MEDIUM"
-                es["risk_level"] = "MEDIUM"
-                logger.info(
-                    "No-GSTIN cap (post-process): risk_rating HIGH→MEDIUM for vendor=%s",
-                    vendor_name,
-                )
-
-            warning_text = (
-                "ENTITY SCOPE WARNING: No GSTIN supplied. Findings below may concern "
-                "related legal entities sharing the trade name (e.g. holding company, "
-                "payments bank subsidiary, group affiliates). Verify the exact legal "
-                "entity on https://services.gst.gov.in/services/searchgstin or "
-                "https://www.mca.gov.in/ before relying on any conclusion."
-            )
-            cp = _final.get("company_profile") or []
-            if not any(
-                isinstance(r, dict) and "ENTITY SCOPE WARNING" in str(r.get("point") or "")
-                for r in cp
-            ):
-                cp.insert(
-                    0,
-                    Finding(
-                        point=warning_text,
-                        source="https://services.gst.gov.in/services/searchgstin",
-                        severity="MEDIUM",  # type: ignore[arg-type]
-                    ).model_dump(),
-                )
-                _final["company_profile"] = cp
-
         _ensure_calibrated_rubric(_final)
         report = VRAReport.model_validate(_final)
 
@@ -503,7 +624,7 @@ async def generate_vra_bundle(
             gst=gst,
             org_type=org_type,
             request_type=request_type,
-            provider_used="gemini",
+            provider_used=provider,
             key_label_used=label1,
             tokens_used=total_tok or None,
             pdf_path=rel,
@@ -523,7 +644,7 @@ async def generate_vra_bundle(
             gst=gst,
             org_type=org_type,
             request_type=request_type,
-            provider_used="gemini",
+            provider_used=provider,
             key_label_used=None,
             tokens_used=None,
             pdf_path=None,

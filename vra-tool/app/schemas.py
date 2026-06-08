@@ -24,21 +24,20 @@ class AdverseFinding(BaseModel):
     entity: str
     search_hyperlink: str
     summary: str
-    severity: Literal["HIGH", "MEDIUM", "LOW", "INFO"] = "INFO"
+    severity: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
     source: Optional[str] = None
 
     @field_validator("severity", mode="before")
     @classmethod
     def coerce_severity(cls, v: Any) -> str:
-        """Coerce non-standard values → INFO (default for clean no-signal rows)."""
+        """Coerce non-standard values (INFO, NONE, UNKNOWN, etc.) → LOW."""
         if v is None:
-            return "INFO"
+            return "LOW"
         s = str(v).strip().upper()
-        if s in ("HIGH", "MEDIUM", "LOW", "INFO"):
+        if s in ("HIGH", "MEDIUM", "LOW"):
             return s
-        if s in ("NONE", "N/A", "NA", "INFORMATIONAL", ""):
-            return "INFO"
-        return "INFO"
+        # Any other value (INFO, NONE, N/A, INFORMATIONAL, …) → LOW
+        return "LOW"
 
 
 class VRAReport(BaseModel):
@@ -145,6 +144,7 @@ class SettingsSaveRequest(BaseModel):
     max_output_tokens: int = Field(16384, ge=256, le=65536)
     daily_quota_limit: int = Field(default=1500, ge=1)
     keys: list[ApiKeyPayload] = Field(default_factory=list)
+    serper_api_key: Optional[str] = None   # Serper.dev search API key
 
 
 class SettingsStateResponse(BaseModel):
@@ -161,6 +161,7 @@ class SettingsStateResponse(BaseModel):
     last_test_message: Optional[str] = None
     last_generation_at: Optional[str] = None
     fernet_configured: bool
+    serper_configured: bool = False   # True when SERPER_API_KEY is set
 
 
 class AuditListResponse(BaseModel):

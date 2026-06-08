@@ -19,6 +19,62 @@ def _finding(point: str, severity: str = "INFO") -> Finding:
     return Finding(point=point, source=_PLACEHOLDER_SOURCE, severity=severity)  # type: ignore[arg-type]
 
 
+# Veto-class keywords → severity=HIGH (also bump dimension to 100 via report_normalization)
+_HIGH_MARKERS = (
+    "wilful default", "willful default",
+    "ofac", "un sanction", "uapa",
+    "ed chargesheet", "pmla", "sfio", "cbi chargesheet",
+    "sebi debarment", "debarred",
+    "cirp admitted", "insolvency admitted", "liquidation order",
+    "gst cancelled", "gstin cancelled", "fake invoic",
+    "convicted", "conviction",
+    "struck off", "struck-off", "disqualified director",
+    "licence cancelled", "licence revoked", "license cancelled", "license revoked",
+    "banking licence", "banking license",
+    "money laundering", "fema violation", "forex violation",
+    "founder arrested", "director arrested", "promoter arrested",
+    "fraud", "scam", "embezzle",
+)
+
+# Moderate red flags → severity=MEDIUM
+_MEDIUM_MARKERS = (
+    "penalty", "fine imposed", "show cause notice", "investigation",
+    "downgrade", "rating revised", "negative outlook",
+    "default", "npa ", "sarfaesi", "drt ",
+    "nclt", "insolvency petition", "winding up",
+    "raid", "search and seizure",
+    "lawsuit", "litigation", "court case",
+    "data breach", "data theft", "ransomware",
+    "regulatory action", "rbi action", "rbi penalty",
+)
+
+# Benign / informational language → keep INFO
+_INFO_NEGATIONS = (
+    "no ", "not found", "clean", "no adverse",
+    "profitable", "growth", "expansion", "launches",
+)
+
+
+def _classify_snippet_severity(text: str) -> str:
+    """Classify a web-search snippet by keyword markers.
+    Returns HIGH / MEDIUM / INFO so dimension scorer can pick it up.
+    """
+    t = (text or "").lower()
+    if not t:
+        return "INFO"
+    # Strong negation in opening clause → INFO (e.g. "No SARFAESI / DRT signals…")
+    head = t[:60]
+    if any(neg in head for neg in ("no sarfaesi", "no gst cancel", "no credit rating",
+                                   "no sebi observ", "no wilful", "no going concern",
+                                   "no ecourts", "no adverse")):
+        return "INFO"
+    if any(m in t for m in _HIGH_MARKERS):
+        return "HIGH"
+    if any(m in t for m in _MEDIUM_MARKERS):
+        return "MEDIUM"
+    return "INFO"
+
+
 def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
     t = (title or "").strip().lower()
     for row in mapping:
@@ -41,15 +97,10 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     es.setdefault("risk_level", synthesis.risk_rating)
     # Without a verified GSTIN, do not let the model label the whole case HIGH (name-only OSINT is ambiguous).
     gstin_ok = bool(GST_RE.match(str(v.get("gst") or "").strip().upper()))
-    if not gstin_ok:
-        # Persist the cap as a flag so the downstream calibrated-rubric pass
-        # (report_normalization._ensure_calibrated_rubric) does not silently
-        # re-promote the rating back to HIGH based on LLM dimension scores.
-        es["_capped_no_gstin"] = True
-        if synthesis.risk_rating == "HIGH":
-            logger.info("Hybrid: capping portfolio risk_rating HIGH→MEDIUM (no verified GSTIN on request)")
-            es["risk_rating"] = "MEDIUM"
-            es["risk_level"] = "MEDIUM"
+    if not gstin_ok and synthesis.risk_rating == "HIGH":
+        logger.info("Hybrid: capping portfolio risk_rating HIGH→MEDIUM (no verified GSTIN on request)")
+        es["risk_rating"] = "MEDIUM"
+        es["risk_level"] = "MEDIUM"
     es["top_findings"] = list(synthesis.top_findings or [])
     es["top_positives"] = list(synthesis.top_positives or [])
     company_profile: list[Finding] = []
@@ -91,31 +142,6 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
                 )
             )
 
-    # Entity-scope disclaimer: when no GSTIN was supplied, findings from
-    # name-only OSINT may pull in news about *related* legal entities sharing
-    # the trade name (e.g. searching "PAYTM" surfaces results about One97
-    # Communications Ltd and Paytm Payments Bank Ltd — three distinct legal
-    # persons). Surface this prominently so reviewers don't assume all
-    # findings concern the exact entity they intended to onboard.
-    if not gstin_ok:
-        company_profile.insert(
-            0,
-            Finding(
-                point=(
-                    "ENTITY SCOPE WARNING: No GSTIN supplied. Findings below may concern related "
-                    "legal entities sharing the trade name (e.g. holding company, payments bank "
-                    "subsidiary, group affiliates). Verify the exact legal entity on "
-                    "https://services.gst.gov.in/services/searchgstin or "
-                    "https://www.mca.gov.in/ before relying on any conclusion."
-                ),
-                source="https://services.gst.gov.in/services/searchgstin",
-                severity="MEDIUM",  # type: ignore[arg-type]
-            ),
-        )
-        es["entity_scope_warning"] = (
-            "Findings derived from name-only OSINT; specific legal entity not verified."
-        )
-
     management: list[Finding] = []
     directors = mca.get("directors") if isinstance(mca.get("directors"), list) else []
     if directors:
@@ -143,45 +169,57 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
             )
         )
 
-    credit_ratings = [
-        _finding(
-            "Hybrid mode: CRISIL/ICRA credit feeds are not automated in this release; "
-            "obtain rating letters from the vendor if material."
-        )
-    ]
-    financial_soundness = [
-        _finding(
-            "Hybrid mode: financial soundness is inferred from public news + GST posture only; "
-            "full accounts are out of scope for collectors."
-        )
-    ]
-    borrowings = [
-        _finding(
-            "Hybrid mode: borrowings / charge data not scraped (MCA CAPTCHA). "
-            "Request MCA CHG-7 / lender confirmations for material exposures."
-        )
-    ]
-    funds_raised = [
-        _finding(
-            "Hybrid mode: funds-raised review is manual; check MCA filings and press when relevant."
-        )
-    ]
-    defaults = [
-        _finding(
-            "Hybrid mode: defaults / wilful defaulter screening is manual — verify via RBI / CIBIL portals."
-        )
-    ]
-    litigations = [
-        _finding(
-            "Hybrid mode: eCourts / NCLT scraping deferred (CAPTCHA / paid APIs). "
-            "News scan may surface litigation hints only."
-        )
-    ]
-    statutory_compliance = [
-        _finding(
-            "Hybrid mode: statutory compliance is limited to GST status in this release."
-        )
-    ]
+    ws = evidence.web_search_results or {}
+
+    def _web_findings(dim_key: str, fallback: str) -> list[Finding]:
+        """Convert web search snippets for a dimension into Finding objects."""
+        snippets = ws.get(dim_key, [])
+        if not snippets:
+            return [_finding(fallback)]
+        findings = []
+        for s in snippets[:5]:
+            title = s.get("title", "")
+            snippet = s.get("snippet", "")
+            url = s.get("url", "") or _PLACEHOLDER_SOURCE
+            text = f"{title} — {snippet}".strip(" —")
+            if text:
+                sev = _classify_snippet_severity(text)
+                findings.append(Finding(point=text[:1000], source=url, severity=sev))  # type: ignore[arg-type]
+        return findings or [_finding(fallback)]
+
+    credit_ratings = _web_findings(
+        "credit_ratings",
+        "No credit rating downgrade or wilful-defaulter records found via web search. "
+        "Verify manually on crisil.com, icra.in, watchoutinvestors.com.",
+    )
+    financial_soundness = _web_findings(
+        "financial_soundness",
+        "No going-concern or auditor qualification signals found via web search. "
+        "Full accounts are out of scope for automated collectors.",
+    )
+    borrowings = _web_findings(
+        "borrowings",
+        "No SARFAESI / DRT / NPA signals found via web search. "
+        "Request MCA CHG-7 / lender confirmations for material exposures.",
+    )
+    funds_raised = _web_findings(
+        "funds_raised",
+        "No SEBI observations or fundraising controversies found via web search.",
+    )
+    defaults = _web_findings(
+        "defaults",
+        "No wilful-defaulter listing or CIBIL suit filings found via web search. "
+        "Verify manually on rbi.org.in and watchoutinvestors.com.",
+    )
+    litigations = _web_findings(
+        "litigations",
+        "No eCourts / NCLT cases surfaced via web search. "
+        "Manual verification on indiankanoon.org recommended.",
+    )
+    statutory_compliance = _web_findings(
+        "statutory_compliance",
+        "No GST cancellation or CBIC enforcement notices found via web search.",
+    )
 
     entity_link = (
         (evidence.news_meta or {}).get("entity_google_search_hyperlink")
@@ -217,7 +255,7 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
                 entity=v.get("name", ""),
                 search_hyperlink=entity_link,
                 summary="No adverse headlines returned from Google News RSS for the constructed query.",
-                severity="INFO",
+                severity="LOW",
                 source=None,
             )
         )
@@ -252,13 +290,22 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     )
 
 
-def compact_evidence_json(evidence: EvidencePack, *, max_chars: int = 48_000) -> str:
-    """Serialize evidence for prompts with a soft size cap."""
+def compact_evidence_json(evidence: EvidencePack, *, max_chars: int = 56_000) -> str:
+    """Serialize evidence for prompts with a soft size cap.
+
+    Web search results are the richest signal — include them prominently.
+    """
+    # Trim web search to top 4 snippets per dimension to stay under token budget
+    web_trimmed: dict[str, Any] = {}
+    for dim, snippets in (evidence.web_search_results or {}).items():
+        web_trimmed[dim] = snippets[:4]
+
     payload = {
         "vendor": evidence.vendor,
         "gst_data": evidence.gst_data,
         "mca_data": evidence.mca_data,
         "news_headlines": evidence.news_headlines[:20],
+        "web_search_results": web_trimmed,          # pre-fetched evidence per dimension
         "news_meta": evidence.news_meta,
         "collector_status": evidence.collector_status,
         "collector_errors": evidence.collector_errors,
@@ -266,4 +313,12 @@ def compact_evidence_json(evidence: EvidencePack, *, max_chars: int = 48_000) ->
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if len(text) <= max_chars:
         return text
+    # Progressively trim web results to fit
+    for max_per_dim in (3, 2, 1):
+        for dim in web_trimmed:
+            web_trimmed[dim] = web_trimmed[dim][:max_per_dim]
+        payload["web_search_results"] = web_trimmed
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(text) <= max_chars:
+            return text
     return text[: max_chars - 20] + "\n… truncated …\n"
