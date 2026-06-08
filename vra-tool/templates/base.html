@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Paytm VRA{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            paytm: { blue: '#00BAF2', dark: '#002970', bg: '#F5F7FA' },
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body class="bg-paytm-bg text-paytm-dark min-h-screen font-[Inter,system-ui,sans-serif]">
+  <header class="bg-white border-b border-slate-200 shadow-sm">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+      <a href="/" class="flex items-center gap-2 text-paytm-dark font-semibold text-lg">
+        <span class="text-2xl" aria-hidden="true">🛡️</span>
+        <span>Paytm <span class="text-paytm-blue">VRA</span> Tool</span>
+      </a>
+      <nav class="flex flex-wrap items-center gap-1 text-sm font-medium">
+        <a href="/" class="nav-pill {% if active == 'generate' %}active{% endif %}">Generate</a>
+        <a href="/#batch-panel" class="nav-pill {% if active == 'batch' %}active{% endif %}">Batch</a>
+        <a href="/audit" class="nav-pill {% if active == 'audit' %}active{% endif %}">Audit</a>
+        <a href="/settings" class="nav-pill {% if active == 'settings' %}active{% endif %}" title="Settings">⚙️</a>
+      </nav>
+    </div>
+  </header>
+  {% block body %}{% endblock %}
+  <div id="toast" class="toast hidden" role="status"></div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

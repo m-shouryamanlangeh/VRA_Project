@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}VRA — Result{% endblock %}
+{% block body %}
+<main class="max-w-xl mx-auto px-6 py-16 text-center">
+  <div class="text-4xl mb-4">✅</div>
+  <h1 class="text-2xl font-bold text-paytm-dark mb-2">Report ready</h1>
+  {% if vendor %}
+  <p class="text-slate-600 mb-6">{{ vendor }}</p>
+  {% endif %}
+  {% if pdf %}
+  <a href="{{ pdf }}" class="inline-block px-6 py-3 rounded-lg bg-paytm-blue text-white font-medium hover:opacity-90">Download PDF</a>
+  {% else %}
+  <p class="text-red-600">Missing PDF link.</p>
+  {% endif %}
+  <p class="mt-8"><a href="/" class="text-paytm-blue underline">Generate another</a></p>
+</main>
+{% endblock %}

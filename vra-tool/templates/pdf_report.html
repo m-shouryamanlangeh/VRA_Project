@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>VRA Report — {{ vendor_display_name }}</title>
+  <style>
+    @page {
+      size: A4 portrait;
+      margin: 18mm 16mm 22mm 16mm;
+      @bottom-center {
+        content: "Generated via Paytm VRA Tool | {{ generated_at }} | Page " counter(page) " / " counter(pages);
+        font-size: 8pt;
+        color: #002970;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 10.5pt;
+      line-height: 1.35;
+      color: #002970;
+      margin: 0;
+    }
+    h1 { color: #00BAF2; font-size: 20pt; margin: 0 0 0.5rem; }
+    h2 { color: #00BAF2; font-size: 13pt; margin: 1.25rem 0 0.5rem; page-break-after: avoid; }
+    h3 { font-size: 11pt; margin: 0.75rem 0 0.35rem; }
+    .cover {
+      page-break-after: always;
+      text-align: center;
+      padding-top: 3cm;
+    }
+    .cover h1 { font-size: 26pt; }
+    .vendor-title { font-size: 22pt; font-weight: 700; margin: 1rem 0; }
+    .badge {
+      display: inline-block;
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-weight: 600;
+      margin-top: 1rem;
+    }
+    .badge-green { background: #dcfce7; color: #166534; }
+    .badge-amber { background: #fef9c3; color: #854d0e; }
+    .badge-red { background: #fee2e2; color: #991b1b; }
+    .confidential { margin-top: 2rem; font-size: 9pt; font-weight: 600; color: #64748b; }
+    .exec-box {
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 12px;
+      margin: 10px 0;
+      background: #f8fafc;
+    }
+    .sev-HIGH { color: #991b1b; font-weight: 600; }
+    .sev-MEDIUM { color: #854d0e; font-weight: 600; }
+    .sev-LOW { color: #166534; font-weight: 600; }
+    .sev-INFO { color: #475569; }
+    a { color: #00BAF2; text-decoration: underline; }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 9.5pt; }
+    th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #f1f5f9; color: #002970; }
+    ol { margin: 0.35rem 0 0.35rem 1.2rem; padding: 0; }
+    .page-break { page-break-before: always; }
+    ul.plain { list-style: disc; margin: 0.25rem 0 0.25rem 1.2rem; }
+  </style>
+</head>
+<body>
+  {% set es = report.executive_summary %}
+  {% set rr = es.get('risk_rating') or es.get('risk_level') or es.get('risk') or 'UNKNOWN' %}
+  {% set rr_upper = (rr|string)|upper %}
+
+  <section class="cover">
+    <p style="font-size:11pt;font-weight:600;">Paytm</p>
+    <h1>Vendor Risk Assessment Report</h1>
+    <p class="vendor-title">{{ report.vendor.get('name', vendor_display_name) }}</p>
+    <p>GST: {{ report.vendor.get('gst', '—') }} &nbsp;|&nbsp; Org: {{ report.vendor.get('org_type', '—') }}</p>
+    <p>Date of search: {{ report.date_of_search }}</p>
+    {% if 'HIGH' in rr_upper or 'RED' in rr_upper %}
+    <div class="badge badge-red">🔴 Risk: {{ rr }}</div>
+    {% elif 'MEDIUM' in rr_upper or 'AMBER' in rr_upper %}
+    <div class="badge badge-amber">🟡 Risk: {{ rr }}</div>
+    {% else %}
+    <div class="badge badge-green">🟢 Risk: {{ rr }}</div>
+    {% endif %}
+    <p class="confidential">CONFIDENTIAL — INTERNAL USE ONLY</p>
+  </section>
+
+  <section>
+    <h2>Executive summary</h2>
+    <div class="exec-box">
+      <p><strong>Risk view:</strong> {{ rr }}</p>
+      {% if es.get('confidence') %}<p><strong>Confidence:</strong> {{ es.get('confidence') }}</p>{% endif %}
+      <p><strong>Recommendation:</strong> {{ report.recommendation }}</p>
+      {% if es.get('top_findings') %}
+      <h3>Top findings</h3>
+      <ul class="plain">
+        {% for item in (es.get('top_findings') or [])[:3] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if es.get('top_positives') %}
+      <h3>Top positives</h3>
+      <ul class="plain">
+        {% for item in (es.get('top_positives') or [])[:3] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+  </section>
+
+  {% macro section_list(title, items) %}
+  {% if items and items|length > 0 %}
+  <section class="page-break">
+    <h2>{{ title }}</h2>
+    <ol>
+      {% for f in items %}
+      <li>
+        {{ f.point }}
+        [<a href="{{ f.source }}">Source</a>]
+        <span class="sev-{{ f.severity }}">({{ f.severity }})</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
+  {% endif %}
+  {% endmacro %}
+
+  {{ section_list('1. Company profile and business details', report.company_profile) }}
+  {{ section_list('2. Management', report.management) }}
+  {{ section_list('3. Credit ratings', report.credit_ratings) }}
+  {{ section_list('4. Financial soundness', report.financial_soundness) }}
+  {{ section_list('5. Borrowings', report.borrowings) }}
+  {{ section_list('6. Funds raised', report.funds_raised) }}
+  {{ section_list('7. MCA filings', report.mca_filings) }}
+  {{ section_list('8. Defaults', report.defaults) }}
+  {{ section_list('9. Litigations', report.litigations) }}
+  {{ section_list('10. Statutory compliance', report.statutory_compliance) }}
+
+  {% if report.blacklist_checks %}
+  <section class="page-break">
+    <h2>Blacklist screening</h2>
+    <table>
+      <thead><tr><th>List</th><th>Status</th><th>Source</th></tr></thead>
+      <tbody>
+        {% for b in report.blacklist_checks %}
+        <tr>
+          <td>{{ b.list_name }}</td>
+          <td><strong>{{ b.status }}</strong></td>
+          <td><a href="{{ b.source }}">Link</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if report.adverse_media %}
+  <section class="page-break">
+    <h2>Adverse media</h2>
+    <table>
+      <thead>
+        <tr><th>Entity</th><th>Search</th><th>Summary</th><th>Severity</th></tr>
+      </thead>
+      <tbody>
+        {% for a in report.adverse_media %}
+        <tr>
+          <td>{{ a.entity }}</td>
+          <td><a href="{{ a.search_hyperlink }}">Google</a></td>
+          <td>{{ a.summary }}</td>
+          <td class="sev-{{ a.severity }}">{{ a.severity }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if report.fraud_aml %}
+  <section class="page-break">
+    <h2>Fraud / AML</h2>
+    <table>
+      <thead>
+        <tr><th>Entity</th><th>Search</th><th>Summary</th><th>Severity</th></tr>
+      </thead>
+      <tbody>
+        {% for a in report.fraud_aml %}
+        <tr>
+          <td>{{ a.entity }}</td>
+          <td><a href="{{ a.search_hyperlink }}">Google</a></td>
+          <td>{{ a.summary }}</td>
+          <td class="sev-{{ a.severity }}">{{ a.severity }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if report.connected_entities %}
+  <section class="page-break">
+    <h2>Connected entities</h2>
+    <ul class="plain">
+      {% for c in report.connected_entities %}
+      <li>
+        {% if c is mapping %}
+          {% for k, v in c.items() %}{{ k }}: {{ v }}{% if not loop.last %}; {% endif %}{% endfor %}
+        {% else %}
+          {{ c }}
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+</body>
+</html>

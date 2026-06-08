@@ -6,16 +6,26 @@ import csv
 import io
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.deps import templates
 from app.models import AuditLog
 from app.schemas import AuditListResponse
 
 router = APIRouter(tags=["audit"])
+
+
+@router.get("/audit", response_class=HTMLResponse)
+def audit_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "audit.html",
+        {"active": "audit"},
+    )
 
 
 def _audit_conditions(

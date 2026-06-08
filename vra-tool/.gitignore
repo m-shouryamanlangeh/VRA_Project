@@ -29,11 +29,3 @@ logs/*
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Frontend
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-
-# Netlify
-.netlify/
