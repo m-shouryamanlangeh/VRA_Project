@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.config import WRITABLE_DIR
+from app.config import BASE_DIR
 from app.core.vra_service import generate_vra_bundle
 from app.database import get_db
 from app.schemas import VendorGenerateRequest, VendorGenerateResponse
@@ -61,7 +61,7 @@ async def generate_report(
 def download_pdf(filename: str) -> FileResponse:
     """Download a generated PDF from ``output/`` (name validated)."""
     safe = _safe_pdf_name(filename)
-    path = WRITABLE_DIR / "output" / safe
+    path = BASE_DIR / "output" / safe
     if not path.is_file():
         raise HTTPException(status_code=404, detail="PDF not found")
     return FileResponse(path, filename=safe, media_type="application/pdf")
@@ -158,7 +158,7 @@ async def generate_batch(
                     org_type=req.org_type,
                     request_type="BATCH",
                 )
-                pdf_path = WRITABLE_DIR / rel
+                pdf_path = BASE_DIR / rel
                 if pdf_path.is_file():
                     zf.write(pdf_path, arcname=pdf_path.name)
             except Exception as exc:

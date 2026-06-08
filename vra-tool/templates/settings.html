@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}VRA — Settings{% endblock %}
+{% block body %}
+<main class="max-w-3xl mx-auto px-6 py-10">
+  <h1 class="text-2xl font-bold text-paytm-dark mb-2">⚙️ Settings</h1>
+
+  <!-- Active provider banner — filled by JS -->
+  <div id="active-provider-banner" class="mb-6 p-3 rounded-lg bg-blue-50 border border-blue-200 text-blue-900 text-sm flex items-center gap-2">
+    <span id="active-provider-text">Loading…</span>
+  </div>
+
+  <div id="fernet-warn" class="hidden mb-6 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+    FERNET_KEY is missing or invalid. Set it in <code class="bg-white px-1 rounded">.env</code> before saving API keys.
+  </div>
+
+  <div class="bg-white rounded-xl shadow border border-slate-100 p-6 space-y-6">
+    <div>
+      <h2 class="text-sm font-semibold text-paytm-dark mb-3">API keys <span id="keys-provider-label" class="font-normal text-slate-400"></span></h2>
+      <div id="keys-container" class="space-y-4"></div>
+      <div class="flex flex-wrap gap-4 mt-3">
+        <button type="button" id="add-primary" class="text-sm text-paytm-blue font-medium hover:underline">+ Add Primary Key</button>
+        <button type="button" id="add-fallback" class="text-sm text-paytm-blue font-medium hover:underline">+ Add Fallback Key</button>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap gap-3 items-center">
+      <button type="button" id="btn-test" class="px-4 py-2 rounded-lg border border-slate-200 font-medium hover:bg-slate-50">Test Connection</button>
+      <button type="button" id="btn-save" class="px-4 py-2 rounded-lg bg-paytm-blue text-white font-medium hover:opacity-90">Save Settings</button>
+      <span id="test-result" class="text-sm text-slate-600" title="Latest test result"></span>
+    </div>
+
+    <details id="settings-advanced" class="group border border-slate-100 rounded-lg">
+      <summary class="cursor-pointer list-none px-4 py-3 text-sm font-medium text-paytm-blue hover:bg-slate-50 rounded-lg flex items-center justify-between">
+        <span>⚙️ Change provider / model</span>
+        <span class="text-slate-400 group-open:rotate-180 transition-transform">▼</span>
+      </summary>
+      <div class="px-4 pb-4 pt-0 border-t border-slate-100">
+        <p class="text-xs text-slate-500 mt-3 mb-4">
+          <strong>Hybrid mode is ON</strong> — Python (DuckDuckGo) fetches web evidence first, so the LLM only needs to
+          analyse it. Free models work fine. Gemini is also fine if you have a key.
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">LLM Provider</label>
+            <select id="llm_provider" class="w-full rounded-lg border border-slate-200 px-3 py-2 bg-white">
+              <option value="gemini">Gemini (free, has own search too)</option>
+              <option value="openrouter">OpenRouter (free models available)</option>
+              <option value="openai" disabled>OpenAI (coming soon)</option>
+              <option value="anthropic" disabled>Claude / Anthropic (coming soon)</option>
+            </select>
+            <p class="text-xs text-slate-500 mt-1" id="provider-hint"></p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Model</label>
+            <select id="llm_model" class="w-full rounded-lg border border-slate-200 px-3 py-2 bg-white">
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Temperature</label>
+            <input type="number" id="temperature" step="0.1" min="0" max="2" class="w-full rounded-lg border border-slate-200 px-3 py-2" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Max output tokens</label>
+            <input type="number" id="max_output_tokens" min="256" class="w-full rounded-lg border border-slate-200 px-3 py-2" />
+          </div>
+          <div class="md:col-span-2">
+            <label class="block text-sm font-medium mb-1">Daily quota limit (display / 80% warning)</label>
+            <input type="number" id="daily_quota_limit" min="1" class="w-full rounded-lg border border-slate-200 px-3 py-2" />
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <!-- ── Serper.dev (Google Search API) ── -->
+    <div class="border border-slate-100 rounded-lg p-4 space-y-3">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="font-medium text-paytm-dark text-sm">🔍 Web Search — Serper.dev (Google Search API)</p>
+          <p class="text-xs text-slate-500 mt-0.5">Free tier: 2,500 searches/month. Replaces unreliable DuckDuckGo. Works for <strong>any</strong> company, every time. <a href="https://serper.dev" target="_blank" class="text-paytm-blue underline">Get free key →</a></p>
+        </div>
+        <span id="serper-status" class="text-xs px-2 py-1 rounded-full font-medium"></span>
+      </div>
+      <div class="flex gap-2 items-center">
+        <input type="password" id="serper_api_key" placeholder="Paste Serper API key here" class="flex-1 rounded border border-slate-200 px-2 py-1 text-sm" />
+        <button type="button" id="btn-save-serper" class="text-sm px-3 py-1 rounded bg-paytm-dark text-white">Save</button>
+      </div>
+    </div>
+
+    <div class="border border-slate-100 rounded-lg p-4 bg-slate-50 text-sm space-y-1">
+      <p class="font-medium text-paytm-dark">Status log</p>
+      <p id="log-test">Last test: —</p>
+      <p id="log-test-msg" class="text-xs text-slate-600 break-words"></p>
+      <p id="log-gen">Last successful generation: —</p>
+    </div>
+  </div>
+</main>
+{% endblock %}
+{% block scripts %}<script src="/static/js/settings.js?v=2"></script>{% endblock %}

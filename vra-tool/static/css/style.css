@@ -1,23 +1,4 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* Paytm VRA — layout helpers on top of Tailwind. */
-
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: #b0c4d8;
-  border-radius: 9999px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #7a9bb5;
-}
+/* Paytm VRA — layout helpers on top of Tailwind */
 
 .nav-pill {
   padding: 0.35rem 0.85rem;
@@ -25,7 +6,6 @@
   color: #002970;
   text-decoration: none;
   transition: background 0.15s ease;
-  cursor: pointer;
 }
 .nav-pill:hover {
   background: #e0f4fc;
@@ -41,11 +21,6 @@
   margin-bottom: -1px;
   background: none;
   cursor: pointer;
-  padding: 0.5rem 1rem;
-  font-size: 0.875rem;
-  font-weight: 500;
-  border-top-left-radius: 0.5rem;
-  border-top-right-radius: 0.5rem;
 }
 .tab-btn.active {
   color: #002970;
@@ -68,7 +43,7 @@
   display: none;
 }
 
-.spinner {
+.spinner.animate-spin {
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin {
