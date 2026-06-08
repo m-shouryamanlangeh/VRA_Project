@@ -2,36 +2,42 @@
 
 Internal web application for Paytm’s compliance team: capture vendor identifiers, run LLM-backed OSINT (Google Gemini with Search grounding), validate sources, and export a structured **PDF** report with an **audit trail** and optional **batch Excel** processing.
 
-## Architecture (ASCII)
+The frontend is a **React (Vite) SPA** in `frontend/`; the backend is a **FastAPI** JSON API in `app/`. In production both are deployed to **Netlify** — the React app is served as static files and the Python API runs as a Netlify Function via `mangum`.
+
+## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────────────────────────┐
-│   Browser   │────▶│  FastAPI (app/main.py)               │
-│  Tailwind   │     │  /generate  /generate/batch          │
-│  + JS       │     │  /settings  /audit  /download/pdf    │
-└─────────────┘     └───────────┬──────────────────────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │ SQLite (SQLAlchemy)   │
-                    │ settings, api_keys,   │
-                    │ audit_logs, quota     │
-                    └───────────┬───────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │ LLMProvider           │
-                    │  └─ Gemini (search)   │
-                    │  └─ OpenAI/Claude stub│
-                    └───────────┬───────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │ WeasyPrint ← pdf tpl  │
-                    └───────────────────────┘
+┌─────────────────────┐     ┌──────────────────────────────────────┐
+│  React SPA (Vite)   │────▶│  FastAPI API (app/main.py)           │
+│  frontend/src/*     │     │  /generate  /generate/batch          │
+│  Tailwind via CDN   │     │  /api/settings  /api/audit           │
+└─────────────────────┘     │  /download/pdf/{filename}            │
+                            └───────────┬──────────────────────────┘
+                                        │
+                            ┌───────────▼───────────┐
+                            │ SQLite (SQLAlchemy)   │
+                            │ settings, api_keys,   │
+                            │ audit_logs, quota     │
+                            └───────────┬───────────┘
+                                        │
+                            ┌───────────▼───────────┐
+                            │ LLMProvider           │
+                            │  └─ Gemini (search)   │
+                            │  └─ OpenAI/Claude stub│
+                            └───────────┬───────────┘
+                                        │
+                            ┌───────────▼───────────┐
+                            │  ReportLab → PDF      │
+                            └───────────────────────┘
 ```
 
-## Setup
+## Local development
+
+You run the **backend** (FastAPI) and the **frontend** (Vite) as two processes. Vite proxies API calls to FastAPI in dev — see `frontend/vite.config.js`.
+
+### 1. Backend
 
 ```bash
-git clone <repo-url>
 cd vra-tool
 python3.11 -m venv venv
 source venv/bin/activate    # Windows: venv\Scripts\activate
@@ -47,7 +53,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Fill `FERNET_KEY=` in `.env`. Optionally set `GEMINI_API_KEY=` for a bootstrap key before using the Settings UI.
 
-Run the app:
+Start the API on port 8000:
 
 ```bash
 ./run.sh
@@ -55,7 +61,35 @@ Run the app:
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open [http://localhost:8000](http://localhost:8000). On first use go to **Settings**, add a **Primary** Gemini API key (stored **encrypted**), then **Test Connection** and **Save**.
+### 2. Frontend
+
+In a second terminal:
+
+```bash
+cd vra-tool/frontend
+npm install
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173). On first use go to **Settings**, add a **Primary** Gemini API key (stored **encrypted**), then **Test Connection** and **Save**.
+
+## Deploying to Netlify
+
+The repo is already configured for Netlify:
+
+- `netlify.toml` — builds React (`cd frontend && npm install && npm run build`), publishes `frontend/dist`, and rewrites API paths to the function.
+- `netlify/functions/api.py` — wraps the FastAPI app with `mangum` for Lambda.
+- `requirements.txt` — Python dependencies installed by Netlify into the function bundle.
+
+In the Netlify dashboard, set these **environment variables** before deploying:
+
+| Variable | Value |
+|---|---|
+| `FERNET_KEY` | output of the Fernet command above |
+| `GEMINI_API_KEY` | optional bootstrap Gemini key |
+| `LOG_LEVEL` | `INFO` |
+
+Caveats: Netlify Functions run on Lambda where only `/tmp` is writable, so the SQLite DB and generated PDFs live there and are **ephemeral** across cold starts. For persistent audit history move `DATABASE_URL` to a hosted Postgres later.
 
 ### Hybrid mode (collectors + synthesis)
 
@@ -83,7 +117,7 @@ pytest tests/test_sharp_pencil.py -v
 
 1. **Implement** `LLMProvider` in `app/core/llm/<provider>.py` (`generate`, `test_connection`) using the same structured JSON contract as Gemini where possible.
 2. **Register** the name in `app/core/llm/factory.py` (`get_provider`).
-3. **Wire** Settings + key storage: extend `ApiKey.provider` values, add UI option in `templates/settings.html`, and branch in `app/core/vra_service.py` if the orchestration differs from Gemini.
+3. **Wire** Settings + key storage: extend `ApiKey.provider` values, add UI option in `frontend/src/pages/SettingsPage.jsx` (the `MODEL_OPTIONS` / provider `<select>`), and branch in `app/core/vra_service.py` if the orchestration differs from Gemini.
 
 ## Sample test vendor
 
@@ -93,7 +127,30 @@ pytest tests/test_sharp_pencil.py -v
 
 ## Project layout
 
-See the repository tree: `app/` (FastAPI, core, prompts), `templates/`, `static/`, `output/` (generated PDFs), `data/vra.db` (SQLite, local dev).
+```
+vra-tool/
+├── app/                       # FastAPI backend (JSON API only)
+│   ├── core/                  # LLM, collectors, PDF, crypto, validation
+│   ├── prompts/               # Stakeholder-owned prompt files
+│   ├── routes/                # vendor.py, settings.py, audit.py
+│   ├── main.py
+│   └── ...
+├── frontend/                  # React + Vite SPA
+│   ├── src/
+│   │   ├── pages/             # HomePage, ResultPage, AuditPage, SettingsPage
+│   │   ├── Layout.jsx
+│   │   ├── ToastContext.jsx
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   ├── index.html
+│   └── vite.config.js
+├── netlify/functions/api.py   # Mangum Lambda wrapper
+├── netlify.toml
+├── requirements.txt
+├── data/                      # blacklists/, vra.db (local dev)
+├── output/                    # generated PDFs (local dev)
+└── tests/                     # pytest suite
+```
 
 ### Database migrations
 
