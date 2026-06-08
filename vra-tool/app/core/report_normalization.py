@@ -68,24 +68,8 @@ _SEVERITY_TO_SCORE: dict[str, int] = {
 }
 
 
-_NEGATION_TOKENS: tuple[str, ...] = (
-    "no ", "not ", "none ", "never ",
-    "no specific", "no adverse", "no record", "no evidence", "no listing",
-    "no active", "no direct", "no known", "no public",
-    "absent", "did not", "didn't", "doesn't ", "does not",
-    "without ", "free of ", "free from ",
-    "negative finding",
-)
-
-
 def _score_for_finding_text(text: str) -> int:
-    """Bump score to 100 when the finding clearly cites a veto-class event.
-
-    Negation guard: if a veto marker is preceded (within ~60 chars) by a
-    negation phrase, treat it as a "no record found" statement and DO NOT
-    escalate. Without this, the LLM saying "No wilful defaulter listings
-    were found" trips the veto path on the keyword inside its own negation.
-    """
+    """Bump score to 100 when the finding clearly cites a veto-class event."""
     t = (text or "").lower()
     veto_markers = (
         "wilful default", "willful default",
@@ -98,20 +82,17 @@ def _score_for_finding_text(text: str) -> int:
         "struck off", "struck-off", "disqualified director",
         "uapa", "fatf black",
     )
-    for m in veto_markers:
-        idx = t.find(m)
-        if idx == -1:
-            continue
-        window_start = max(0, idx - 60)
-        prefix = t[window_start:idx]
-        if any(neg in prefix for neg in _NEGATION_TOKENS):
-            continue
-        return 100
-    return 0
+    return 100 if any(m in t for m in veto_markers) else 0
 
 
 def _derive_dimension_score(findings: list[Any]) -> int:
-    """Highest severity-band across findings in a section, with veto bumps."""
+    """Highest severity-band across findings in a section, with veto bumps.
+
+    Veto-text bump only fires when the LLM already scored the finding HIGH
+    (base ≥ 75).  Applying it to LOW/INFO findings causes false positives
+    because sentences like "Not found on sanctions lists" or "No wilful
+    default records found" contain veto keywords in a NEGATIVE context.
+    """
     if not findings:
         return 0
     best = 0
@@ -120,14 +101,14 @@ def _derive_dimension_score(findings: list[Any]) -> int:
             continue
         sev = str(f.get("severity") or "").upper()
         base = _SEVERITY_TO_SCORE.get(sev, 25)
-        text = f.get("point") or f.get("summary") or ""
-        # Skip veto-marker text scan for explicit no-signal findings. The LLM
-        # describes "no wilful defaulter listings found" using the keyword
-        # itself; without this guard, every clean vendor gets bumped to 100.
-        if sev in ("INFO", "NONE"):
-            bumped = base
-        else:
+        # Only apply text-based veto bump when the LLM already flagged HIGH.
+        # LOW/INFO findings that mention "sanction" / "default" etc. are almost
+        # always negative-context ("Not found on…") and must NOT be bumped.
+        if base >= 75:
+            text = f.get("point") or f.get("summary") or ""
             bumped = max(base, _score_for_finding_text(str(text)))
+        else:
+            bumped = base
         best = max(best, bumped)
     return best
 
@@ -193,114 +174,85 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             dim[k] = -1
 
-    # For any missing dimension, derive from the corresponding section's findings.
+    # Findings are the ONLY ground truth for dimension scores.
+    # Gemini's dimension_scores JSON field is systematically unreliable —
+    # it hallucinates 100 (veto-class) even when per-section findings are
+    # all INFO or LOW (e.g. "No records found").  The previous partial fix
+    # (cap only when derived==0) still let hallucinated 100s through whenever
+    # findings were LOW (derived=25).  The correct rule: always use derived.
+    #
+    # If Gemini genuinely found something severe it MUST have written a
+    # HIGH-severity finding in the relevant section — the derived score will
+    # then be ≥ 75 automatically.  There is no legitimate case where
+    # Gemini's summary score should exceed what the per-section findings show.
     for section, dim_key in _SECTION_TO_DIMENSION.items():
-        if dim.get(dim_key, -1) < 0:
-            derived = _derive_dimension_score(data.get(section) or [])
-            # Take the max if section already contributed (e.g. fraud_aml).
-            existing = dim.get(dim_key, 0)
-            dim[dim_key] = max(existing if existing > 0 else 0, derived)
+        derived = _derive_dimension_score(data.get(section) or [])
+        dim[dim_key] = derived
 
     # Anything still negative → 0 (no signal).
     for k in _ALL_DIMENSIONS:
-        if dim[k] < 0:
+        if dim.get(k, -1) < 0:
             dim[k] = 0
-
-    # Phantom-dimension guard: if the LLM reports a high score for a dimension
-    # but the corresponding section contains no non-INFO findings, the score
-    # is unsupported. Cap at 25 (LOW band) so it cannot drive overall rating
-    # or floor rules. Note: a finding with a rescued citation ("[Verify
-    # manually:" note) DOES count as backing evidence here — the LLM observed
-    # something during search, the URL just couldn't be deep-linked. The note
-    # in the report tells reviewers to verify; we don't silently delete the
-    # claim by capping the score.
-    _dim_to_section = {v: k for k, v in _SECTION_TO_DIMENSION.items()}
-    for dim_key, score_val in list(dim.items()):
-        if score_val < 50:
-            continue
-        section = _dim_to_section.get(dim_key)
-        if not section:
-            continue
-        rows = data.get(section) or []
-        has_real_finding = any(
-            isinstance(r, dict)
-            and str(r.get("severity") or "").upper() not in ("", "INFO", "NONE")
-            for r in rows
-        )
-        if not has_real_finding:
-            logger.warning(
-                "Phantom dim score: '%s'=%d but section '%s' has no non-INFO "
-                "findings — capping at 25",
-                dim_key, score_val, section,
-            )
-            dim[dim_key] = min(score_val, 25)
 
     es["dimension_scores"] = dim
 
-    # 2. risk_score (compute if missing or out of range).
-    score_raw = es.get("risk_score")
-    try:
-        score = int(round(float(score_raw))) if score_raw is not None else -1
-    except (TypeError, ValueError):
-        score = -1
-    if score < 0 or score > 100:
-        score = _compute_risk_score(dim)
+    # 2. risk_score — always recompute from derived dimension scores.
+    # Gemini's own risk_score is NOT trusted because it was computed against
+    # its hallucinated dimension_scores, not the corrected derived ones.
+    score = _compute_risk_score(dim)
     es["risk_score"] = score
 
-    # 3. veto_triggered — true if any dimension hit 100.
-    veto_existing = bool(es.get("veto_triggered"))
-    veto_computed = any(v >= 100 for v in dim.values())
-    veto = veto_existing or veto_computed
+    # 3. veto_triggered — derived ONLY from dimension scores computed above.
+    # Gemini's veto_triggered flag is NOT trusted — it is systematically set to
+    # true even when no per-section finding justifies it (same hallucination
+    # pattern as dimension_scores).  The single source of truth is whether any
+    # derived dimension hit 100 (i.e. a HIGH-severity finding in that section).
+    veto = any(v >= 100 for v in dim.values())
     es["veto_triggered"] = veto
-    if veto and not es.get("veto_reason"):
+    if veto:
+        # Set or overwrite veto_reason to match the actual triggering dimension.
         for k in ("defaults", "sanctions_aml_fraud", "management_integrity",
                   "litigations", "statutory_compliance", "mca_filings"):
             if dim.get(k, 0) >= 100:
                 es["veto_reason"] = f"Auto-HIGH: severe finding in {k.replace('_', ' ')}."
                 break
+    else:
+        # Clear any hallucinated veto_reason from Gemini.
+        es.pop("veto_reason", None)
 
-    # 4. confidence — default to MEDIUM if Gemini didn't set it.
+    # 4. confidence — default to MEDIUM if LLM didn't set it.
     conf = str(es.get("confidence") or "").upper()
     if conf not in ("HIGH", "MEDIUM", "LOW"):
         conf = "MEDIUM"
+    # Safety: if score=0 and ALL dimension scores are 0, the LLM has no adverse
+    # signals — could be genuinely clean OR unknown small company.
+    # Downgrade to LOW confidence (MEDIUM or HIGH) unless the LLM had real positive
+    # evidence: HIGH confidence is only valid when GSTIN/CIN confirmed in ≥2 sources.
+    # LOW confidence → CONDITIONAL recommendation (Step 6) prevents false PROCEED.
+    if score == 0 and all(v == 0 for v in dim.values()) and conf in ("MEDIUM", "HIGH"):
+        conf = "LOW"
+        logger.info(
+            "_ensure_calibrated_rubric: all dimensions=0, score=0 — downgrading "
+            "confidence %s→LOW (no adverse signals found; forcing CONDITIONAL)", conf
+        )
     es["confidence"] = conf
 
-    # 5. risk_rating — recompute if missing/invalid OR if Gemini's value contradicts
-    #    the score + veto rules (e.g. score=70 but rating=LOW).
-    # When the hybrid path has capped the rating because no GSTIN was supplied,
-    # never let the upward promotion below re-escalate it: name-only OSINT can
-    # legitimately produce high dim scores about *related* entities, and
-    # promoting those to HIGH would defeat the cap.
-    capped_no_gstin = bool(es.get("_capped_no_gstin"))
-    rr = str(es.get("risk_rating") or es.get("risk_level") or "").upper()
-    computed_rating = _score_to_rating(score, dim, veto)
-    if rr not in ("HIGH", "MEDIUM", "LOW"):
-        rr = computed_rating if not (capped_no_gstin and computed_rating == "HIGH") else "MEDIUM"
-    else:
-        # Promote if the computed rating is stricter (never silently downgrade Gemini).
-        order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-        if order[computed_rating] > order[rr] and not capped_no_gstin:
-            rr = computed_rating
+    # 5. risk_rating — always use the mechanically computed rating.
+    # Gemini's risk_rating is NOT trusted: it hallucinates HIGH even when all
+    # per-section findings are INFO/LOW and veto=False.  The "never downgrade"
+    # rule was a safeguard for human reviewers; it does not apply to an LLM
+    # whose structured fields are systematically wrong.  The computed_rating
+    # from our derived dimension scores + veto flag is the single source of truth.
+    rr = _score_to_rating(score, dim, veto)
     es["risk_rating"] = rr
 
-    # 6. recommendation — enforce Step 6 mapping mechanically.
-    expected_rec = _rating_to_recommendation(rr, conf)
-    given_rec = str(data.get("recommendation") or "").upper()
-    if given_rec not in ("PROCEED", "CONDITIONAL", "REJECT"):
-        data["recommendation"] = expected_rec
-    elif capped_no_gstin:
-        # When the no-GSTIN cap is active the rubric mapping is authoritative.
-        # The "safety bias" upgrade-only path below would let an LLM-asserted
-        # REJECT survive even though the calibrated rating is now MEDIUM,
-        # producing a contradiction in the executive summary.
-        data["recommendation"] = expected_rec
-    else:
-        # If Gemini said PROCEED but rating is MEDIUM/HIGH → override (safety bias).
-        rec_order = {"PROCEED": 0, "CONDITIONAL": 1, "REJECT": 2}
-        if rec_order[expected_rec] > rec_order[given_rec]:
-            data["recommendation"] = expected_rec
-        else:
-            data["recommendation"] = given_rec
+    # 6. recommendation — always derive mechanically from computed rating.
+    # Gemini's recommendation is NOT trusted (it follows its hallucinated rating).
+    # The computed recommendation from our derived rating + confidence is the
+    # single source of truth.  Safety-bias: never let PROCEED through when rating
+    # is MEDIUM or HIGH — the expected_rec from _rating_to_recommendation already
+    # enforces this.
+    data["recommendation"] = _rating_to_recommendation(rr, conf)
 
 
 def normalize_legacy_vra_payload(

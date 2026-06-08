@@ -79,6 +79,21 @@ def format_vra_full_prompt(vendor_name: str, gst: str, org_type: str, date: str)
     )
 
 
+def format_vra_knowledge_prompt(vendor_name: str, gst: str, org_type: str, date: str) -> str:
+    """
+    Fill ``vra_knowledge.txt`` — for models WITHOUT live search access.
+
+    Uses training-knowledge mode: asks the model to report what it already
+    knows about the vendor rather than performing live internet searches.
+    Used as fallback when web search collectors fail and provider is OpenRouter.
+    """
+    tpl = load_prompt_template("vra_knowledge.txt")
+    return (
+        _fill_vendor_fields(tpl, vendor_name, gst_for_prompt(gst), org_type, date)
+        + _VRA_REPORT_JSON_ROOT_CONTRACT
+    )
+
+
 def format_adverse_media_prompt(vendor_name: str, gst: str, org_type: str, date: str) -> str:
     """Fill ``adverse_media.txt`` placeholders."""
     tpl = load_prompt_template("adverse_media.txt")

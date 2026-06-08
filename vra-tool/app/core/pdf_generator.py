@@ -25,7 +25,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from app.config import WRITABLE_DIR
+from app.config import BASE_DIR
 from app.schemas import VRAReport
 
 logger = logging.getLogger(__name__)
@@ -151,16 +151,12 @@ def _source_label(url: str) -> str:
 
 
 def _extract_risk_level(raw: str) -> str:
-    """Extract a clean HIGH / MEDIUM / LOW token from any risk_rating text Gemini returns.
-
-    Returns the FIRST standalone HIGH/MEDIUM/LOW token in the string. Plain
-    substring matching would incorrectly resolve "LOW (no HIGH-severity
-    findings)" to HIGH; taking the first occurrence preserves the intended
-    rating and treats trailing rationale text as decoration.
-    """
+    """Extract a clean HIGH / MEDIUM / LOW token from any risk_rating text Gemini returns."""
     u = str(raw or "").upper()
-    m = re.search(r"\b(HIGH|MEDIUM|LOW)\b", u)
-    return m.group(1) if m else "UNKNOWN"
+    for level in ("HIGH", "MEDIUM", "LOW"):
+        if level in u:
+            return level
+    return "UNKNOWN"
 
 
 def _report_section_map(report: VRAReport) -> list[tuple[str, list]]:
@@ -312,7 +308,7 @@ def _table_style(header_bg=None) -> TableStyle:
 
 def render_vra_pdf(report: VRAReport, seq: int, vendor_display_name: str) -> Path:
     """Render VRAReport to ``output/VRA_{seq}_{slug}.pdf`` and return its path."""
-    out_dir = WRITABLE_DIR / "output"
+    out_dir = BASE_DIR / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = f"VRA_{seq}_{slugify_vendor(vendor_display_name)}.pdf"
     out_path = out_dir / filename
@@ -361,10 +357,11 @@ def render_vra_pdf(report: VRAReport, seq: int, vendor_display_name: str) -> Pat
     )
     rr = _extract_risk_level(str(rr_raw))  # always HIGH / MEDIUM / LOW / UNKNOWN
 
-    # Do NOT re-derive the badge from `recommendation` here. _ensure_calibrated_rubric
-    # in report_normalization.py is the single source of truth for the
-    # rating ↔ recommendation mapping; overriding the badge again at render
-    # time produces silent disagreement between the PDF and the JSON response.
+    # Override: REJECT vendor must never show below HIGH; PROCEED vendor capped at MEDIUM.
+    if report.recommendation == "REJECT" and rr != "HIGH":
+        rr = "HIGH"
+    elif report.recommendation == "PROCEED" and rr == "HIGH":
+        rr = "MEDIUM"
 
     badge_bg, badge_fg = _risk_badge_color(rr)
     badge_tbl = Table(
