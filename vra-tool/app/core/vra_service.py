@@ -195,9 +195,29 @@ def _ordered_gemini_keys(db: Session) -> list[ApiKey]:
     return _ordered_provider_keys(db, "gemini")
 
 
-def build_gemini_key_candidates(db: Session) -> list[tuple[ApiKey | None, str, str]]:
-    """(db_row_or_none, plaintext_secret, label) in retry order — Gemini keys only."""
+def build_gemini_key_candidates(
+    db: Session,
+    *,
+    user_api_key: str | None = None,
+) -> list[tuple[ApiKey | None, str, str]]:
+    """(db_row_or_none, plaintext_secret, label) in retry order — Gemini keys only.
+
+    Multi-tenant flow: when a user-supplied key arrives via the X-Gemini-Api-Key
+    request header, it takes top priority and is used directly without storing
+    in the DB. This isolates each browser session — user A's key is never
+    persisted, user B's key never touches user A's request.
+
+    Fallback order if no user key:
+      1. DB-stored keys (encrypted, active)
+      2. GEMINI_API_KEY env var (deployment bootstrap only)
+    """
     out: list[tuple[ApiKey | None, str, str]] = []
+    if user_api_key and user_api_key.strip():
+        # User-provided key: prepended as a one-shot candidate. row=None means
+        # _deactivate_bad_key is skipped (we never persist this key), and the
+        # label "USER" lets logs distinguish it from ENV / DB rows.
+        out.append((None, user_api_key.strip(), "USER"))
+        return out
     for row in _ordered_gemini_keys(db):
         try:
             plain = decrypt_secret(row.encrypted_key)
@@ -211,9 +231,20 @@ def build_gemini_key_candidates(db: Session) -> list[tuple[ApiKey | None, str, s
     return out
 
 
-def build_openrouter_key_candidates(db: Session) -> list[tuple[ApiKey | None, str, str]]:
-    """(db_row_or_none, plaintext_secret, label) in retry order — OpenRouter keys only."""
+def build_openrouter_key_candidates(
+    db: Session,
+    *,
+    user_api_key: str | None = None,
+) -> list[tuple[ApiKey | None, str, str]]:
+    """(db_row_or_none, plaintext_secret, label) in retry order — OpenRouter keys only.
+
+    Same multi-tenant pattern as build_gemini_key_candidates: user-supplied key
+    (via X-OpenRouter-Api-Key header) takes precedence; otherwise DB / ENV.
+    """
     out: list[tuple[ApiKey | None, str, str]] = []
+    if user_api_key and user_api_key.strip():
+        out.append((None, user_api_key.strip(), "USER"))
+        return out
     for row in _ordered_provider_keys(db, "openrouter"):
         try:
             plain = decrypt_secret(row.encrypted_key)
@@ -221,7 +252,6 @@ def build_openrouter_key_candidates(db: Session) -> list[tuple[ApiKey | None, st
             logger.warning("Skipping OpenRouter key id=%s: %s", row.id, exc)
             continue
         out.append((row, plain, row.label))
-    # Support env fallback for OpenRouter too
     env_key = (getattr(app_settings, "OPENROUTER_API_KEY", None) or "").strip()
     if not out and env_key:
         out.append((None, env_key, "ENV"))
@@ -229,12 +259,15 @@ def build_openrouter_key_candidates(db: Session) -> list[tuple[ApiKey | None, st
 
 
 def build_key_candidates(
-    db: Session, provider: str
+    db: Session,
+    provider: str,
+    *,
+    user_api_key: str | None = None,
 ) -> list[tuple[ApiKey | None, str, str]]:
     """Dispatch to the right candidate builder by provider name."""
     if provider == "openrouter":
-        return build_openrouter_key_candidates(db)
-    return build_gemini_key_candidates(db)
+        return build_openrouter_key_candidates(db, user_api_key=user_api_key)
+    return build_gemini_key_candidates(db, user_api_key=user_api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -453,15 +486,21 @@ async def generate_vra_bundle(
     request_type: str = "SINGLE",
     verify_urls: bool = True,
     user: str = "system",
+    user_api_key: str | None = None,
 ) -> tuple[VRAReport, str, AuditLog]:
     """
     Full pipeline: primary + adverse LLM passes, validation, PDF, audit row.
+
+    ``user_api_key`` is a per-request override from the caller (e.g. a value
+    the frontend pulled from localStorage and sent as X-Gemini-Api-Key). When
+    present, it skips DB and ENV keys entirely — the LLM call uses the
+    caller's key. The key is never persisted.
 
     Returns:
         Tuple of (report, relative PDF path ``output/...``, audit ORM object).
     """
     provider = (get_value(db, "llm_provider", "gemini") or "gemini").strip().lower()
-    candidates = build_key_candidates(db, provider)
+    candidates = build_key_candidates(db, provider, user_api_key=user_api_key)
 
     if not candidates:
         provider_display = provider.capitalize()

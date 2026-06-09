@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { useToast } from "../ToastContext.jsx";
-import { apiFetch, apiUrl } from "../api.js";
+import { Link } from "react-router-dom";
+import { apiFetch, apiUrl, getStoredGeminiKey } from "../api.js";
 
 const ORG_TYPES = [
   "",
@@ -177,6 +178,8 @@ export default function HomePage() {
     }
   }
 
+  const hasGeminiKey = Boolean(getStoredGeminiKey());
+
   return (
     <main className="max-w-3xl mx-auto px-6 py-10">
       <div className="mb-8">
@@ -185,6 +188,17 @@ export default function HomePage() {
           Generate comprehensive risk reports via OSINT
         </p>
       </div>
+
+      {!hasGeminiKey && (
+        <div className="mb-6 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+          <strong>No Gemini API key configured.</strong> Generation will fail
+          until you add one.{" "}
+          <Link to="/settings" className="underline font-medium">
+            Open Settings
+          </Link>{" "}
+          and paste your key (it stays in this browser only).
+        </div>
+      )}
 
       <div className="flex gap-2 mb-6 border-b border-slate-200">
         <button

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -35,8 +35,15 @@ def _safe_pdf_name(name: str) -> str:
 async def generate_report(
     body: VendorGenerateRequest,
     db: Session = Depends(get_db),
+    x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
 ) -> VendorGenerateResponse:
-    """Run full OSINT VRA pipeline and return structured JSON + PDF link."""
+    """Run full OSINT VRA pipeline and return structured JSON + PDF link.
+
+    Per-user key flow: if the caller sends ``X-Gemini-Api-Key``, that key is
+    used for the LLM call instead of any server-stored key. The key is not
+    persisted. Frontend pulls it from localStorage and injects it on every
+    request, so each browser session has its own isolated Gemini quota.
+    """
     try:
         report, rel, audit = await generate_vra_bundle(
             db,
@@ -44,6 +51,7 @@ async def generate_report(
             gst=body.gst,
             org_type=(body.org_type or "Unknown").strip() or "Unknown",
             request_type="SINGLE",
+            user_api_key=x_gemini_api_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -71,6 +79,7 @@ def download_pdf(filename: str) -> FileResponse:
 async def generate_batch(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
 ) -> StreamingResponse:
     """
     Accept an Excel file with columns ``vendor_name``, ``org_type``; ``gst`` is optional.
@@ -157,6 +166,7 @@ async def generate_batch(
                     gst=req.gst,
                     org_type=req.org_type,
                     request_type="BATCH",
+                    user_api_key=x_gemini_api_key,
                 )
                 pdf_path = WRITABLE_DIR / rel
                 if pdf_path.is_file():

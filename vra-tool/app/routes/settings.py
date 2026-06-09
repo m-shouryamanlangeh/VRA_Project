@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -114,8 +114,16 @@ def api_settings_save(body: SettingsSaveRequest, db: Session = Depends(get_db)) 
 
 
 @router.post("/api/settings/test")
-async def api_settings_test(db: Session = Depends(get_db)) -> dict:
-    candidates = build_gemini_key_candidates(db)
+async def api_settings_test(
+    db: Session = Depends(get_db),
+    x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
+) -> dict:
+    """Test the active Gemini key.
+
+    Header ``X-Gemini-Api-Key`` (browser-local user key) takes priority over
+    DB / ENV keys. Lets users verify their pasted key before generating.
+    """
+    candidates = build_gemini_key_candidates(db, user_api_key=x_gemini_api_key)
     if not candidates:
         raise HTTPException(status_code=400, detail="No Gemini API keys available to test.")
     model = get_value(db, "llm_model", "gemini-2.0-flash")
@@ -148,9 +156,12 @@ async def api_settings_test(db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/settings/test")
-async def settings_test_alias(db: Session = Depends(get_db)) -> dict:
+async def settings_test_alias(
+    db: Session = Depends(get_db),
+    x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
+) -> dict:
     """Alias matching stakeholder path ``POST /settings/test``."""
-    return await api_settings_test(db)
+    return await api_settings_test(db, x_gemini_api_key=x_gemini_api_key)
 
 
 @router.delete("/api/settings/keys/{key_id}")

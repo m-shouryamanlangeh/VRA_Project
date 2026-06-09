@@ -1,6 +1,156 @@
 import { useEffect, useState } from "react";
 import { useToast } from "../ToastContext.jsx";
-import { apiFetch } from "../api.js";
+import {
+  apiFetch,
+  clearStoredGeminiKey,
+  getStoredGeminiKey,
+  setStoredGeminiKey,
+} from "../api.js";
+
+// Browser-local key UI — replaces the server-stored key flow for multi-tenant
+// use. Each user pastes their own Gemini key; it lives only in their browser's
+// localStorage and is sent as X-Gemini-Api-Key on every API call.
+function BrowserKeyCard() {
+  const { showToast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [stored, setStored] = useState(getStoredGeminiKey());
+  const [testing, setTesting] = useState(false);
+
+  const masked = stored
+    ? "•".repeat(Math.max(0, stored.length - 4)) + stored.slice(-4)
+    : "";
+
+  function save() {
+    const v = draft.trim();
+    if (!v) {
+      showToast("Paste a Gemini API key first.", false);
+      return;
+    }
+    setStoredGeminiKey(v);
+    setStored(v);
+    setDraft("");
+    setEditing(false);
+    showToast("Saved to this browser. Other users / browsers are unaffected.", true);
+  }
+
+  function clear() {
+    if (!window.confirm("Remove the Gemini API key from this browser?")) return;
+    clearStoredGeminiKey();
+    setStored("");
+    showToast("Key removed from this browser.", true);
+  }
+
+  async function testKey() {
+    setTesting(true);
+    try {
+      const res = await apiFetch("/api/settings/test", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Test failed");
+      if (data.ok) {
+        showToast(data.message || "OK — key works.", true);
+      } else {
+        showToast(data.message || "Key rejected by Gemini.", false);
+      }
+    } catch (err) {
+      showToast(err.message || String(err), false);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <div className="border border-paytm-blue/20 bg-paytm-blue/5 rounded-lg p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-paytm-dark">Your Gemini API Key</h2>
+        <span className="text-xs text-slate-500 uppercase">Browser-only</span>
+      </div>
+      <p className="text-sm text-slate-600">
+        Paste your personal Gemini key. It's stored only in this browser's
+        localStorage and sent with each generation request. Nothing is saved on
+        the server — other users have their own keys, fully isolated.
+      </p>
+      <p className="text-xs text-slate-500">
+        Get a free key at{" "}
+        <a
+          href="https://aistudio.google.com/apikey"
+          target="_blank"
+          rel="noreferrer"
+          className="text-paytm-blue underline"
+        >
+          aistudio.google.com/apikey
+        </a>
+        .
+      </p>
+
+      {stored && !editing ? (
+        <div className="flex flex-wrap items-center gap-3 pt-1">
+          <code className="flex-1 min-w-[220px] bg-white border border-slate-200 px-3 py-2 rounded text-sm">
+            {masked}
+          </code>
+          <button
+            type="button"
+            onClick={() => {
+              setEditing(true);
+              setDraft("");
+            }}
+            className="text-sm font-medium text-paytm-blue hover:underline"
+          >
+            Replace
+          </button>
+          <button
+            type="button"
+            onClick={testKey}
+            disabled={testing}
+            className="text-sm font-medium px-3 py-2 rounded bg-paytm-dark text-white disabled:opacity-50"
+          >
+            {testing ? "Testing…" : "Test Key"}
+          </button>
+          <button
+            type="button"
+            onClick={clear}
+            className="text-sm text-red-600 hover:text-red-700 font-medium"
+          >
+            Remove
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-2 pt-1">
+          <input
+            type="password"
+            placeholder="Paste your Gemini API key (starts with AIzaSy…)"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            className="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"
+            autoFocus
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={save}
+              disabled={!draft.trim()}
+              className="text-sm font-medium px-3 py-2 rounded bg-paytm-blue text-white disabled:opacity-50"
+            >
+              Save to this browser
+            </button>
+            {stored && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditing(false);
+                  setDraft("");
+                }}
+                className="text-sm text-slate-600 hover:text-slate-800"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const DEFAULT_STATE = {
   llm_provider: "gemini",
@@ -286,20 +436,31 @@ export default function SettingsPage() {
   return (
     <main className="max-w-3xl mx-auto px-6 py-10">
       <h1 className="text-2xl font-bold text-paytm-dark mb-2">⚙️ Settings</h1>
-      <p className="text-slate-600 text-sm mb-8">
-        Rotate your <strong>Gemini</strong> API keys here (stored encrypted). Model
-        and other options stay at app defaults unless you open Advanced.
+      <p className="text-slate-600 text-sm mb-6">
+        Bring your own <strong>Gemini</strong> API key. It's stored only in
+        this browser — your usage and quota are isolated from anyone else
+        using the portal.
       </p>
 
-      {!state.fernet_configured && (
-        <div className="mb-6 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm">
-          FERNET_KEY is missing or invalid. Set it in{" "}
-          <code className="bg-white px-1 rounded">.env</code> (or Netlify
-          environment variables) before saving API keys.
-        </div>
-      )}
+      {/* Browser-local key — the new multi-tenant flow */}
+      <div className="mb-8">
+        <BrowserKeyCard />
+      </div>
 
-      <div className="bg-white rounded-xl shadow border border-slate-100 p-6 space-y-6">
+      <details className="mb-6">
+        <summary className="cursor-pointer text-sm font-medium text-slate-600 hover:text-paytm-blue">
+          Advanced: server-stored keys (self-hosted deployments only)
+        </summary>
+
+        {!state.fernet_configured && (
+          <div className="mt-3 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm">
+            FERNET_KEY is missing or invalid. Set it in{" "}
+            <code className="bg-white px-1 rounded">.env</code> (or Netlify
+            environment variables) before saving API keys.
+          </div>
+        )}
+
+      <div className="bg-white rounded-xl shadow border border-slate-100 p-6 space-y-6 mt-3">
         <div>
           <h2 className="text-sm font-semibold text-paytm-dark mb-3">API keys</h2>
           <div className="space-y-4">
@@ -476,6 +637,7 @@ export default function SettingsPage() {
           <p>Last successful generation: {state.last_generation_at || "—"}</p>
         </div>
       </div>
+      </details>
     </main>
   );
 }
