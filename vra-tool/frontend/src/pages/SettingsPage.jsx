@@ -315,6 +315,7 @@ export default function SettingsPage() {
                 k={k}
                 onStage={stageSecret}
                 onUnstage={unstageSecret}
+                onDelete={deleteKey}
               />
             ))}
           </div>
