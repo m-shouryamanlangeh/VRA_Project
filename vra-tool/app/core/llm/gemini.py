@@ -217,8 +217,14 @@ def _is_retryable_with_fallback(exc: BaseException) -> bool:
 
 def _skip_model_for_standard_generate_content(model_id: str) -> bool:
     """
-    Exclude model IDs that advertise generateContent but error with Interactions-only,
-    or that are realtime / live variants not meant for batch generateContent.
+    Exclude model IDs that advertise generateContent but cannot produce the
+    structured-text JSON our schemas expect. Covers:
+      - realtime / live variants (Interactions API only)
+      - image generation (e.g. ``gemini-2.5-flash-image``) — generateContent
+        returns image bytes, not text, so the schema-bound call silently
+        produces empty/malformed JSON, then the next fallback model is tried
+      - audio / TTS / embedding / video — wrong modality
+      - Gemini 3 previews (Interactions-only via standard call)
     """
     u = (model_id or "").strip().lower()
     if not u:
@@ -229,6 +235,26 @@ def _skip_model_for_standard_generate_content(model_id: str) -> bool:
     if "gemini-3" in u and "preview" in u:
         return True
     if "gemini-3.1" in u and "preview" in u:
+        return True
+    # Modality filters — these models advertise generateContent but are not
+    # suitable for our text+JSON workload.
+    # NOTE: match "image" as a whole token (image / -image / image-preview)
+    # so we don't accidentally match "imagen" twice; "imagen" is checked too.
+    non_text_markers = (
+        "-image",       # gemini-2.5-flash-image, gemini-3-pro-image-preview
+        "image-",       # gemini-2.5-flash-image-preview
+        "imagen",       # imagen-3, imagen-3-fast
+        "-tts",         # gemini-2.5-flash-tts, gemini-2.5-pro-tts-preview
+        "-audio",       # native-audio variants
+        "audio-",
+        "embedding",    # text-embedding, gemini-embedding
+        "embed-",
+        "-embed",
+        "-video",       # video models
+        "robotics",     # Gemini Robotics
+        "bison",        # PaLM era — long retired
+    )
+    if any(m in u for m in non_text_markers):
         return True
     return False
 
@@ -426,15 +452,30 @@ def _short_model_id(full_name: Optional[str]) -> str:
 
 
 def _model_preference_key(model_id: str) -> tuple[int, str]:
-    """Lower tuple sorts earlier = try sooner."""
+    """Lower tuple sorts earlier = try sooner.
+
+    Free-tier reality on Gemini 2.x (as of mid-2026):
+      - gemini-2.0-flash / -001 have free-tier quota = 0 → always 429
+      - gemini-2.5-flash often returns 503 (high demand)
+      - gemini-2.5-flash-lite is the most reliable free-tier model
+
+    We therefore prefer 2.5-flash-lite first, then 2.5-flash, then 2.0-flash,
+    then everything else. The user-configured `preferred` model from
+    settings (passed via resolve_model_candidates) is always pinned at
+    rank 0 regardless of this heuristic.
+    """
     u = model_id.lower()
-    if any(x in u for x in ("embed", "imagen", "tts", "bison", "robotics")):
+    if any(x in u for x in ("embed", "imagen", "image", "tts", "audio",
+                            "bison", "robotics", "video")):
         return (80, model_id)
-    if "2.0-flash" in u and "lite" not in u:
+    # Lite models first — most likely to respond on free tier.
+    if "2.5-flash-lite" in u:
         return (0, model_id)
+    if "2.0-flash-lite" in u:
+        return (1, model_id)
     if "2.5-flash" in u:
         return (2, model_id)
-    if "2.0-flash-lite" in u:
+    if "2.0-flash" in u:
         return (4, model_id)
     if "2.5-pro" in u or "2.0-pro" in u:
         return (10, model_id)
@@ -476,14 +517,18 @@ async def fetch_live_generate_content_model_ids(api_key: str) -> list[str]:
 
 
 def _static_model_candidates(preferred: str) -> list[str]:
-    """Fallback when ListModels fails or returns empty (offline, older SDK, etc.)."""
+    """Fallback when ListModels fails or returns empty (offline, older SDK, etc.).
+
+    Order matches _model_preference_key: lite first, then 2.5-flash, then
+    2.0-flash (which is rate-limited on free tier as of mid-2026).
+    """
     out: list[str] = []
-    # Unversioned 2.0 Flash is the most portable alias across API versions.
     for m in (
         preferred.strip(),
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-2.0-flash-001",
-        "gemini-2.5-flash",
     ):
         if not m or m in _UNSUPPORTED_MODEL_IDS:
             continue
