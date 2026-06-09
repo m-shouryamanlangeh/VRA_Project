@@ -63,9 +63,15 @@ app = FastAPI(
 _default_dev_origins = [
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "http://127.0.0.1:5175",
+    "http://localhost:5175",
     "http://127.0.0.1:8000",
     "http://localhost:8000",
+    # Production Netlify deploys. Both the dash and no-dash variants are
+    # in active use; keep both in the fallback list so a missing
+    # CORS_ALLOW_ORIGINS env var on Render doesn't break either.
     "https://vra-backgroundverification.netlify.app",
+    "https://vrabackgroundverification.netlify.app",
 ]
 _env_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
 if _env_origins:
