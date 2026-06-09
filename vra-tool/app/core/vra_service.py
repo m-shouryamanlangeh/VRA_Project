@@ -568,6 +568,53 @@ async def generate_vra_bundle(
                 )
                 report = _ensure_vendor(VRAReport.model_validate(main_raw), vendor_name, gst, org_type)
                 tok2 = 0
+            elif evidence_is_sparse and provider == "gemini":
+                # Web search collector (DuckDuckGo) is reliably blocked on cloud
+                # hosts (Render, AWS Lambda, etc.). When it returns 0 snippets we
+                # cannot synthesize per-section findings from evidence — they
+                # come out as INFO placeholders, and the scorecard shows
+                # all-zeros even though Gemini's grounded search could find the
+                # real signals.
+                #
+                # Fall back to the legacy full-VRA prompt with Gemini grounding
+                # enabled: one call asks the LLM for the complete report
+                # (per-section findings + risk_rating + top_findings) using
+                # Google Search as the grounding tool. This is the same path
+                # used when USE_HYBRID_MODE=False and produces the
+                # VRA_45-quality output regardless of host IP.
+                logger.info(
+                    "hybrid_mode: collectors returned 0 web snippets — "
+                    "falling back to legacy full-VRA prompt with Gemini "
+                    "grounded search (vendor=%s).",
+                    vendor_name,
+                )
+                main_token_cap = max(max_output_tokens, 16384)
+                vendor_scope = _VENDOR_SCOPE_NOTE.format(vendor_name=vendor_name, gst=gst)
+                main_prompt = (
+                    format_vra_full_prompt(vendor_name, gst, org_type, date_str)
+                    + VRA_MAIN_JSON_TAIL
+                    + vendor_scope
+                )
+                main_raw, _row1, label1, tok1 = await _run_llm_attempts(
+                    db,
+                    provider,
+                    candidates,
+                    model=model,
+                    temperature=temperature,
+                    max_output_tokens=main_token_cap,
+                    prompt=main_prompt,
+                    schema=VRAReport,
+                    use_search=True,  # Gemini grounded Google Search
+                )
+                main_raw = normalize_legacy_vra_payload(
+                    main_raw,
+                    date_str=date_str,
+                    vendor_name=vendor_name,
+                    gst=gst,
+                    org_type=org_type,
+                )
+                report = _ensure_vendor(VRAReport.model_validate(main_raw), vendor_name, gst, org_type)
+                tok2 = 0
             else:
                 # Hybrid path: evidence pack + optional LLM search grounding (Gemini)
                 synthesis_prompt = format_synthesis_prompt(vendor_name, gst, org_type, evidence)
