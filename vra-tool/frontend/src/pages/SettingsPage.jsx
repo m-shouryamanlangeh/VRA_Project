@@ -60,95 +60,157 @@ function BrowserKeyCard() {
   }
 
   return (
-    <div className="border border-paytm-blue/20 bg-paytm-blue/5 rounded-lg p-5 space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-paytm-dark">Your Gemini API Key</h2>
-        <span className="text-xs text-slate-500 uppercase">Browser-only</span>
-      </div>
-      <p className="text-sm text-slate-600">
-        Paste your personal Gemini key. It's stored only in this browser's
-        localStorage and sent with each generation request. Nothing is saved on
-        the server — other users have their own keys, fully isolated.
-      </p>
-      <p className="text-xs text-slate-500">
-        Get a free key at{" "}
-        <a
-          href="https://aistudio.google.com/apikey"
-          target="_blank"
-          rel="noreferrer"
-          className="text-paytm-blue underline"
-        >
-          aistudio.google.com/apikey
-        </a>
-        .
-      </p>
-
-      {stored && !editing ? (
-        <div className="flex flex-wrap items-center gap-3 pt-1">
-          <code className="flex-1 min-w-[220px] bg-white border border-slate-200 px-3 py-2 rounded text-sm">
-            {masked}
-          </code>
-          <button
-            type="button"
-            onClick={() => {
-              setEditing(true);
-              setDraft("");
-            }}
-            className="text-sm font-medium text-paytm-blue hover:underline"
-          >
-            Replace
-          </button>
-          <button
-            type="button"
-            onClick={testKey}
-            disabled={testing}
-            className="text-sm font-medium px-3 py-2 rounded bg-paytm-dark text-white disabled:opacity-50"
-          >
-            {testing ? "Testing…" : "Test Key"}
-          </button>
-          <button
-            type="button"
-            onClick={clear}
-            className="text-sm text-red-600 hover:text-red-700 font-medium"
-          >
-            Remove
-          </button>
+    <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      {/* Header strip */}
+      <header className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-paytm-blue/10 to-transparent">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-paytm-blue/10 text-paytm-blue flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-paytm-dark leading-tight">
+                Your Gemini API Key
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Stored only in this browser. Not sent to any server other than Google.
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-paytm-blue bg-paytm-blue/10 px-2.5 py-1 rounded-full uppercase whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-paytm-blue"></span>
+            Browser-only
+          </span>
         </div>
-      ) : (
-        <div className="space-y-2 pt-1">
-          <input
-            type="password"
-            placeholder="Paste your Gemini API key (starts with AIzaSy…)"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            className="w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono"
-            autoFocus
-          />
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={save}
-              disabled={!draft.trim()}
-              className="text-sm font-medium px-3 py-2 rounded bg-paytm-blue text-white disabled:opacity-50"
-            >
-              Save to this browser
-            </button>
-            {stored && (
+      </header>
+
+      {/* Body */}
+      <div className="p-6 space-y-4">
+        {stored && !editing ? (
+          <>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex-1 min-w-[260px] flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-sm text-slate-700">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 text-emerald-600 flex-shrink-0">
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+                <span className="truncate">{masked}</span>
+              </div>
+              <button
+                type="button"
+                onClick={testKey}
+                disabled={testing}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-paytm-dark text-white text-sm font-medium hover:bg-paytm-dark/90 disabled:opacity-50 transition-colors"
+              >
+                {testing ? (
+                  <>
+                    <svg className="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Testing…
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                      <polyline points="22 4 12 14.01 9 11.01" />
+                    </svg>
+                    Test key
+                  </>
+                )}
+              </button>
+            </div>
+            <div className="flex items-center gap-4 text-sm pt-1">
               <button
                 type="button"
                 onClick={() => {
-                  setEditing(false);
+                  setEditing(true);
                   setDraft("");
                 }}
-                className="text-sm text-slate-600 hover:text-slate-800"
+                className="text-paytm-blue hover:text-paytm-dark font-medium transition-colors"
               >
-                Cancel
+                Replace key
               </button>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
+              <span className="text-slate-300">|</span>
+              <button
+                type="button"
+                onClick={clear}
+                className="text-red-600 hover:text-red-700 font-medium transition-colors"
+              >
+                Remove from browser
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <label className="block">
+              <span className="text-sm font-medium text-paytm-dark">API key</span>
+              <input
+                type="password"
+                placeholder="AIzaSy…"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && draft.trim()) save();
+                }}
+                className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-mono placeholder-slate-400 focus:border-paytm-blue focus:ring-2 focus:ring-paytm-blue/20 focus:outline-none transition-colors"
+                autoFocus
+              />
+              <span className="block mt-1.5 text-xs text-slate-500">
+                Get a free key at{" "}
+                <a
+                  href="https://aistudio.google.com/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-paytm-blue hover:underline font-medium"
+                >
+                  aistudio.google.com/apikey
+                </a>
+                .
+              </span>
+            </label>
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={save}
+                disabled={!draft.trim()}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-paytm-blue text-white text-sm font-semibold hover:bg-paytm-blue/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                  <polyline points="17 21 17 13 7 13 7 21" />
+                  <polyline points="7 3 7 8 15 8" />
+                </svg>
+                Save key
+              </button>
+              {stored && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditing(false);
+                    setDraft("");
+                  }}
+                  className="px-4 py-2.5 text-sm text-slate-600 hover:text-paytm-dark font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Footnote strip */}
+      <footer className="px-6 py-3 bg-slate-50 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-500">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 text-slate-400 flex-shrink-0">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+        <span>Each browser session is fully isolated. Other users have their own keys and quotas.</span>
+      </footer>
+    </section>
   );
 }
 
@@ -435,23 +497,27 @@ export default function SettingsPage() {
 
   return (
     <main className="max-w-3xl mx-auto px-6 py-10">
-      <h1 className="text-2xl font-bold text-paytm-dark mb-2">⚙️ Settings</h1>
-      <p className="text-slate-600 text-sm mb-6">
-        Bring your own <strong>Gemini</strong> API key. It's stored only in
-        this browser — your usage and quota are isolated from anyone else
-        using the portal.
-      </p>
-
-      {/* Browser-local key — the new multi-tenant flow */}
       <div className="mb-8">
-        <BrowserKeyCard />
+        <h1 className="text-2xl font-bold text-paytm-dark tracking-tight">Settings</h1>
+        <p className="text-slate-600 text-sm mt-1.5">
+          Bring your own <span className="font-semibold text-paytm-dark">Gemini</span> API key.
+          It's stored only in this browser — your usage and quota are isolated from anyone else using the portal.
+        </p>
       </div>
 
-      <details className="mb-6">
-        <summary className="cursor-pointer text-sm font-medium text-slate-600 hover:text-paytm-blue">
-          Advanced: server-stored keys (self-hosted deployments only)
-        </summary>
+      {/* Browser-local key — the new multi-tenant flow */}
+      <BrowserKeyCard />
 
+      {/*
+        The server-stored "API keys" + "Advanced" sections were removed —
+        the portal is now per-user / per-browser only. The code below is
+        retained as dead UI: it depends on `state`, `keys`, `addKey`,
+        `stageSecret`, `unstageSecret`, `deleteKey`, etc., which are still
+        defined above. Wrap the entire trailing block in `{false && ...}`
+        to hide it without churning the surrounding helpers.
+      */}
+      {false && (
+        <>
         {!state.fernet_configured && (
           <div className="mt-3 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-sm">
             FERNET_KEY is missing or invalid. Set it in{" "}
@@ -637,7 +703,8 @@ export default function SettingsPage() {
           <p>Last successful generation: {state.last_generation_at || "—"}</p>
         </div>
       </div>
-      </details>
+        </>
+      )}
     </main>
   );
 }
