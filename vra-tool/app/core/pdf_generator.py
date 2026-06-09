@@ -481,65 +481,6 @@ def render_vra_pdf(report: VRAReport, seq: int, vendor_display_name: str) -> Pat
         story.append(Spacer(1, 2 * mm))
         story.append(Paragraph(_xml_text(_es_narrative), s["body"]))
 
-    # ── DIMENSION SCORECARD (12 weighted dimensions from calibrated rubric) ─
-    _dim = es.get("dimension_scores")
-    if isinstance(_dim, dict) and _dim:
-        _DIM_LABELS = [
-            ("defaults",              "Defaults / Wilful Default",     15),
-            ("sanctions_aml_fraud",   "Sanctions / AML / Fraud",       15),
-            ("litigations",           "Litigations",                   10),
-            ("statutory_compliance",  "Statutory Compliance",          10),
-            ("adverse_media",         "Adverse Media",                 10),
-            ("management_integrity",  "Management Integrity",          10),
-            ("credit_ratings",        "Credit Ratings",                 8),
-            ("borrowings",            "Borrowings / Bank Stress",       7),
-            ("mca_filings",           "MCA Filings / ROC",              5),
-            ("financial_soundness",   "Financial Soundness",            5),
-            ("funds_raised",          "Funds Raised Quality",           3),
-            ("company_profile",       "Company Profile Concerns",       2),
-        ]
-
-        def _score_band(v: int) -> str:
-            if v >= 75:
-                return "Severe"
-            if v >= 50:
-                return "Material"
-            if v >= 25:
-                return "Minor"
-            return "Clean"
-
-        story.append(Spacer(1, 4 * mm))
-        story.append(Paragraph("Risk Dimension Scorecard (weighted)", s["h3"]))
-        dim_rows: list[list[Any]] = [[
-            Paragraph("<b>Dimension</b>", s["table_cell"]),
-            Paragraph("<b>Weight</b>", s["table_cell"]),
-            Paragraph("<b>Score</b>", s["table_cell"]),
-            Paragraph("<b>Band</b>", s["table_cell"]),
-        ]]
-        for key, label, weight in _DIM_LABELS:
-            raw = _dim.get(key)
-            try:
-                val = int(round(float(raw))) if raw is not None else 0
-            except (TypeError, ValueError):
-                val = 0
-            val = max(0, min(100, val))
-            dim_rows.append([
-                Paragraph(_xml_text(label), s["table_cell"]),
-                Paragraph(f"{weight}%", s["table_cell"]),
-                Paragraph(str(val), s["table_cell"]),
-                Paragraph(_score_band(val), s["table_cell"]),
-            ])
-        dim_tbl = Table(dim_rows, colWidths=[70 * mm, 20 * mm, 20 * mm, 30 * mm])
-        dim_tbl.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("ALIGN", (1, 1), (-1, -1), "CENTER"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
-        story.append(dim_tbl)
-
     # ── VENDOR PROFILE (basic info, structured) ───────────────────────────
     v = report.vendor or {}
     vendor_name = str(v.get("name") or "").strip() or "—"
