@@ -244,6 +244,50 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
     # whose structured fields are systematically wrong.  The computed_rating
     # from our derived dimension scores + veto flag is the single source of truth.
     rr = _score_to_rating(score, dim, veto)
+
+    # Narrative-vs-rating consistency check.  When fallback models (e.g.
+    # gemini-2.5-flash-lite under quota pressure) produce structured output
+    # they sometimes set risk_rating=LOW while the free-form narrative and
+    # `top_findings` describe concrete HIGH-severity events (license cancelled,
+    # money laundering, arrest, fraud probe). The structured fields drive the
+    # scorecard; the narrative goes into the executive summary. If we don't
+    # reconcile, the reviewer sees a LOW badge alongside a REJECT narrative.
+    #
+    # Detection: rating == LOW (score 0, all dims 0) but `top_findings` /
+    # summary text contains HIGH veto markers naming concrete events.
+    # Resolution: promote rating to MEDIUM (cap), mark confidence LOW so the
+    # recommendation drops to CONDITIONAL.  This surfaces the contradiction
+    # as a data-quality issue rather than silently choosing one side.
+    if rr == "LOW" and all(v == 0 for v in dim.values()):
+        narrative_blobs: list[str] = []
+        for k in ("top_findings", "top_risk_drivers", "top_positives"):
+            v = es.get(k)
+            if isinstance(v, list):
+                narrative_blobs.extend(str(x) for x in v if x)
+            elif isinstance(v, str):
+                narrative_blobs.append(v)
+        for k in ("summary", "narrative", "overview", "assessment"):
+            v = es.get(k)
+            if isinstance(v, str):
+                narrative_blobs.append(v)
+        joined = " ".join(narrative_blobs).lower()
+        if joined and _score_for_finding_text(joined) >= 100:
+            logger.warning(
+                "_ensure_calibrated_rubric: rating=LOW but narrative contains HIGH "
+                "markers — promoting to MEDIUM + confidence=LOW so the recommendation "
+                "drops to CONDITIONAL. Likely cause: lite-fallback model producing "
+                "inconsistent structured output."
+            )
+            rr = "MEDIUM"
+            conf = "LOW"
+            es["confidence"] = conf
+            es.setdefault(
+                "_rating_promoted_reason",
+                "Narrative cites HIGH-severity events but structured "
+                "dimensions are empty; promoted to MEDIUM with LOW confidence "
+                "for manual review.",
+            )
+
     es["risk_rating"] = rr
 
     # 6. recommendation — always derive mechanically from computed rating.
