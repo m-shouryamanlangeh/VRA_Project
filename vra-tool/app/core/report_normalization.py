@@ -189,6 +189,112 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
         derived = _derive_dimension_score(data.get(section) or [])
         dim[dim_key] = derived
 
+    # Event-driven minimum-severity floor. The LLM is non-deterministic on
+    # severity classification — two runs of the same vendor can land the
+    # same RBI restriction at HIGH on one run and MEDIUM on the next (we
+    # observed Paytm classified LOW/PROCEED at 08:53 and MEDIUM/CONDITIONAL
+    # at 08:32 from the same prompt). Compliance reports cannot tolerate
+    # that drift.
+    #
+    # Scan top_findings + executive narrative for unambiguous veto-class
+    # event phrases. When a match is found, set a MINIMUM floor on the
+    # relevant dimensions so the worst-case run still produces the correct
+    # rating. The LLM can still go HIGHER (e.g. 100/veto) when its own
+    # findings warrant it; this only prevents the run from going LOWER
+    # than the documented event severity.
+    narrative_text = ""
+    for k in ("top_findings", "top_risk_drivers", "top_positives"):
+        v = es.get(k)
+        if isinstance(v, list):
+            narrative_text += " " + " ".join(str(x) for x in v if x)
+        elif isinstance(v, str):
+            narrative_text += " " + v
+    for k in ("summary", "narrative", "overview", "assessment"):
+        v = es.get(k)
+        if isinstance(v, str):
+            narrative_text += " " + v
+    narrative_text = narrative_text.lower()
+
+    # Each entry: (phrase_match_set, {dimension: minimum_score})
+    # Phrases must appear without a preceding negation ("no", "not", "without")
+    # for the floor to apply — `_score_for_finding_text` already handles
+    # negation; we reuse that pattern here.
+    _EVENT_FLOORS: tuple[tuple[tuple[str, ...], dict[str, int]], ...] = (
+        # RBI enforcement against the vendor / its banking arm
+        (
+            ("rbi cease", "rbi directed", "cease and desist", "stop onboarding",
+             "stop accepting new", "stop further deposit", "stop banking",
+             "license cancelled", "licence cancelled", "license revoked",
+             "licence revoked", "rbi penalties", "rbi penalty",
+             "supervisory restriction", "regulatory restriction",
+             "rbi imposed restriction", "rbi enforcement"),
+            {"defaults": 75, "statutory_compliance": 75, "credit_ratings": 50},
+        ),
+        # Money laundering / FEMA / ED probe
+        (
+            ("money laundering", "fema violation", "pmla chargesheet",
+             "ed chargesheet", "ed probe", "ed investigation",
+             "enforcement directorate", "fiu-ind penalty", "fiu penalty"),
+            {"sanctions_aml_fraud": 75, "statutory_compliance": 75},
+        ),
+        # Director/promoter arrest / FIR / criminal investigation
+        (
+            ("director arrested", "founder arrested", "promoter arrested",
+             "fir against", "criminal investigation", "ed summons",
+             "named in fir", "arrested by"),
+            {"management_integrity": 75, "litigations": 50, "sanctions_aml_fraud": 50},
+        ),
+        # Insolvency / liquidation
+        (
+            ("cirp admitted", "insolvency admitted", "liquidation order",
+             "nclt admission"),
+            {"financial_soundness": 75, "borrowings": 75, "defaults": 75},
+        ),
+        # Credit downgrade explicitly cited
+        (
+            ("credit rating downgrade", "rating downgrade",
+             "rating watch negative", "negative outlook revised",
+             "rating placed under watch"),
+            {"credit_ratings": 50, "financial_soundness": 50},
+        ),
+        # Wilful default / SEBI debarment / GST cancellation
+        (
+            ("wilful defaulter listed", "sebi debarment", "sebi debarred",
+             "gst cancelled", "gstin cancelled"),
+            {"defaults": 75, "statutory_compliance": 75},
+        ),
+    )
+
+    _NEG_WINDOW = 30  # chars of context to look back for negation
+    _NEG_TOKENS = ("no ", "not ", "without ", "none of ", "absent ",
+                   "did not", "doesn't ", "does not", "free of ", "free from ")
+
+    def _phrase_present_unnegated(text: str, phrases: tuple[str, ...]) -> bool:
+        for p in phrases:
+            idx = text.find(p)
+            if idx == -1:
+                continue
+            prefix = text[max(0, idx - _NEG_WINDOW):idx]
+            if any(neg in prefix for neg in _NEG_TOKENS):
+                continue
+            return True
+        return False
+
+    applied_floors: list[str] = []
+    for phrases, floors in _EVENT_FLOORS:
+        if not _phrase_present_unnegated(narrative_text, phrases):
+            continue
+        for dim_key, floor in floors.items():
+            current = dim.get(dim_key, 0)
+            if current < floor:
+                dim[dim_key] = floor
+                applied_floors.append(f"{dim_key}: {current}→{floor} ({phrases[0]!r})")
+    if applied_floors:
+        logger.info(
+            "_ensure_calibrated_rubric: event-driven severity floors applied: %s",
+            "; ".join(applied_floors),
+        )
+
     # Anything still negative → 0 (no signal).
     for k in _ALL_DIMENSIONS:
         if dim.get(k, -1) < 0:

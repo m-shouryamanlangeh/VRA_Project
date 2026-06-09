@@ -153,6 +153,41 @@ VRA_MAIN_JSON_TAIL = (
     "with severity LOW and a Google News search hyperlink.\n"
     "7. All findings must be based on what you actually find through internet search. "
     "Never reproduce static registry data as a finding. Never fabricate citations.\n"
+    "\n"
+    "8. SEVERITY RUBRIC — apply these classifications consistently. Same event, "
+    "same severity, every run.\n"
+    "   HIGH events (severity=HIGH; ALSO bump the listed dimensions to score 75):\n"
+    "     • RBI cease-and-desist, license cancellation, supervisory restriction, "
+    "       directive to stop onboarding / accepting deposits / banking transactions\n"
+    "         → defaults=HIGH, statutory_compliance=HIGH, credit_ratings=HIGH\n"
+    "     • Money-laundering, FEMA, FIU-IND penalty, ED probe, PMLA chargesheet\n"
+    "         → fraud_aml=HIGH, statutory_compliance=HIGH\n"
+    "     • Director/promoter arrest, FIR, criminal investigation, ED summons\n"
+    "         → management=HIGH, fraud_aml=HIGH, litigations=HIGH\n"
+    "     • CIRP admitted, NCLT liquidation, GST cancellation, wilful default listing,\n"
+    "       SEBI debarment\n"
+    "         → corresponding dimension=HIGH\n"
+    "     • Adverse credit rating downgrade explicitly cited\n"
+    "         → credit_ratings=HIGH, financial_soundness=HIGH\n"
+    "   MEDIUM events (severity=MEDIUM; dimension score ~50):\n"
+    "     • Stock price decline, market-cap loss, analyst concerns, profitability "
+    "       pressure (without a regulator action driving it)\n"
+    "     • Routine consumer complaints aggregated on complaint sites\n"
+    "     • Show-cause notices that have not yet resulted in a final order\n"
+    "   LOW / INFO events (severity=LOW or INFO; dimension score ≤25):\n"
+    "     • Standard MCA / GST filings completed on time\n"
+    "     • Routine commercial litigation typical of large-scale operations\n"
+    "     • IPO completion, funding rounds with no irregularities\n"
+    "     • No public record found after authoritative-portal search\n"
+    "   CRITICAL: an RBI cease-and-desist or license cancellation is NEVER a MEDIUM. "
+    "   It is ALWAYS HIGH on defaults AND statutory_compliance, regardless of how the "
+    "   narrative is phrased. Do not soften regulator-enforcement events to 'scrutiny' "
+    "   or 'under watch' — those are MEDIUM phrasings reserved for situations where no "
+    "   binding order has been issued.\n"
+    "\n"
+    "9. CONSISTENCY: for the same vendor on different runs, dimension scores must "
+    "be reproducible within ±15 points. Use the rubric above as the contract — do "
+    "not rephrase 'cease-and-desist' to 'regulatory uncertainty' to lower severity.\n"
 )
 
 _VENDOR_SCOPE_NOTE = (
@@ -511,7 +546,11 @@ async def generate_vra_bundle(
 
     default_model = _DEFAULT_MODEL.get(provider, "gemini-2.5-flash")
     model = get_value(db, "llm_model", default_model)
-    temperature = float(get_value(db, "llm_temperature", "0.2"))
+    # Temperature 0.0 — the same vendor must produce the same structured output
+    # across runs. With temp > 0 we saw Paytm classified as LOW/PROCEED on one
+    # run and MEDIUM/CONDITIONAL on the next, 21 minutes apart, same prompt.
+    # Compliance reports cannot tolerate that drift.
+    temperature = float(get_value(db, "llm_temperature", "0.0"))
     max_output_tokens = int(get_value(db, "llm_max_output_tokens", "16384"))
 
     try:
