@@ -265,6 +265,117 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
         if row.severity == "HIGH":
             fraud_aml.append(row)
 
+    # Synthesis-finding routing. When the web search collector returned nothing
+    # for a dimension (common on cloud hosts where DDG blocks egress) every
+    # section above falls back to a single INFO placeholder. But the LLM's
+    # `synthesis.top_findings` array often contains real risk descriptions
+    # tagged with a dimension prefix, e.g. "sanctions_aml_fraud: PPBL penalized
+    # for money laundering...". Without routing, those findings land only in
+    # executive_summary.top_findings and never drive dimension_scores, so the
+    # scorecard reads 0/Clean even though the narrative cites real risks.
+    #
+    # Route each top_finding into the matching per-section list at MEDIUM
+    # severity (NOT HIGH — the LLM narrative is not source-verifiable on its
+    # own; capping at MEDIUM forces CONDITIONAL recommendation and surfaces
+    # the need for manual confirmation).  Apply only when the existing
+    # section list is just the placeholder INFO row (don't clobber real web
+    # evidence).
+    _DIM_TO_FINDING_SECTION = {
+        "company_profile":      "company_profile",
+        "management_integrity": "management",
+        "credit_ratings":       "credit_ratings",
+        "financial_soundness":  "financial_soundness",
+        "borrowings":           "borrowings",
+        "funds_raised":         "funds_raised",
+        "mca_filings":          "mca_filings",
+        "defaults":             "defaults",
+        "litigations":          "litigations",
+        "statutory_compliance": "statutory_compliance",
+    }
+    _section_lookup: dict[str, list[Finding]] = {
+        "company_profile":      company_profile,
+        "management":           management,
+        "credit_ratings":       credit_ratings,
+        "financial_soundness":  financial_soundness,
+        "borrowings":           borrowings,
+        "funds_raised":         funds_raised,
+        "mca_filings":          mca_filings,
+        "defaults":             defaults,
+        "litigations":          litigations,
+        "statutory_compliance": statutory_compliance,
+    }
+
+    def _section_only_has_placeholder(rows: list[Finding]) -> bool:
+        """True if the section's findings are exclusively INFO placeholders."""
+        return bool(rows) and all(
+            (getattr(r, "severity", "INFO") or "INFO").upper() == "INFO"
+            for r in rows
+        )
+
+    def _split_dim_prefix(raw: str) -> tuple[str | None, str]:
+        """Parse 'dim_key: text' → (dim_key, text). Falls back to (None, text)."""
+        s = (raw or "").strip()
+        if ":" not in s:
+            return None, s
+        head, _, tail = s.partition(":")
+        head_norm = head.strip().lower().replace("-", "_").replace(" ", "_")
+        if head_norm in _DIM_TO_FINDING_SECTION or head_norm in (
+            "sanctions_aml_fraud", "adverse_media",
+        ):
+            return head_norm, tail.strip()
+        return None, s
+
+    _synthesis_routed = 0
+    for raw in (synthesis.top_findings or []):
+        dim_key, text = _split_dim_prefix(str(raw))
+        if not text:
+            continue
+        # Handle the two AdverseFinding-typed dims separately.
+        if dim_key in ("sanctions_aml_fraud", "adverse_media"):
+            target_list = fraud_aml if dim_key == "sanctions_aml_fraud" else adverse_media
+            already = any(
+                (text[:80].lower() in (str(getattr(a, "summary", "")) or "").lower())
+                for a in target_list
+            )
+            if already:
+                continue
+            target_list.append(
+                AdverseFinding(
+                    entity=vendor_label,
+                    search_hyperlink=entity_link,
+                    summary=(text + " [Verify manually: source not retrieved by collectors.]")[:2000],
+                    severity="MEDIUM",  # type: ignore[arg-type]
+                    source=None,
+                )
+            )
+            _synthesis_routed += 1
+            continue
+        # Finding-typed sections.
+        section_name = _DIM_TO_FINDING_SECTION.get(dim_key) if dim_key else None
+        if not section_name:
+            continue
+        target_findings = _section_lookup[section_name]
+        if not _section_only_has_placeholder(target_findings):
+            # Real evidence already populated this section from web search;
+            # don't add another MEDIUM derived only from narrative.
+            continue
+        target_findings.clear()  # remove the INFO placeholder
+        target_findings.append(
+            Finding(
+                point=(text + " [Verify manually: source not retrieved by collectors.]")[:1000],
+                source=_PLACEHOLDER_SOURCE,
+                severity="MEDIUM",  # type: ignore[arg-type]
+            )
+        )
+        _synthesis_routed += 1
+
+    if _synthesis_routed:
+        logger.info(
+            "hybrid_report: routed %d synthesis top_findings into per-section "
+            "lists (collectors returned no web evidence for those dimensions).",
+            _synthesis_routed,
+        )
+
     connected: list[dict[str, Any]] = []
     if isinstance(mca.get("connected"), list):
         connected = [x for x in mca["connected"] if isinstance(x, dict)]
