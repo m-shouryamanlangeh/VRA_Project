@@ -427,6 +427,31 @@ def render_vra_pdf(report: VRAReport, seq: int, vendor_display_name: str) -> Pat
     story.append(exec_tbl)
     story.append(Spacer(1, 3 * mm))
 
+    # Empty-signal warning. Surfaces when _ensure_calibrated_rubric detects all
+    # dimensions = 0 and forces PROCEED→CONDITIONAL. Renders as a yellow amber
+    # callout so the reviewer cannot miss that the all-clean scorecard means
+    # "no signal found" rather than "verified clean".
+    empty_warning = es.get("empty_signal_warning")
+    if empty_warning:
+        _warn_style = ParagraphStyle(
+            "empty_warn",
+            parent=s["finding"],
+            backColor=colors.HexColor("#FEF3C7"),
+            borderColor=colors.HexColor("#F59E0B"),
+            borderWidth=1,
+            borderPadding=8,
+            leftIndent=4,
+            rightIndent=4,
+            textColor=colors.HexColor("#78350F"),
+            fontSize=9,
+            leading=12,
+        )
+        story.append(Paragraph(
+            f"<b>⚠ Insufficient public-domain signal.</b> {_xml_text(str(empty_warning))}",
+            _warn_style,
+        ))
+        story.append(Spacer(1, 3 * mm))
+
     # Accept new calibrated keys (key_risk_drivers / key_mitigants) or legacy ones.
     top_findings = es.get("key_risk_drivers") or es.get("top_findings") or []
     if top_findings:

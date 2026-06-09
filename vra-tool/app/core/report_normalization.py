@@ -402,7 +402,35 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
     # single source of truth.  Safety-bias: never let PROCEED through when rating
     # is MEDIUM or HIGH — the expected_rec from _rating_to_recommendation already
     # enforces this.
-    data["recommendation"] = _rating_to_recommendation(rr, conf)
+    rec = _rating_to_recommendation(rr, conf)
+
+    # Empty-signal safety: when every dimension scored 0, the system found
+    # nothing about this vendor in public sources. That is NOT the same as
+    # "verified clean" — it usually means the vendor is small / unknown /
+    # outside the LLM's training data. Two protections apply:
+    #
+    # (a) Refuse to recommend PROCEED on an empty report. The confidence
+    #     downgrade above usually forces this already, but belt-and-suspenders
+    #     in case any rating/confidence combo could still produce PROCEED.
+    # (b) Set `empty_signal_warning` on the executive_summary so the PDF
+    #     renderer can show an amber callout — the all-zero scorecard
+    #     should not visually read as "verified clean".
+    if all(v == 0 for v in dim.values()):
+        if rec == "PROCEED":
+            logger.info(
+                "_ensure_calibrated_rubric: all dimensions=0 — forcing "
+                "PROCEED→CONDITIONAL."
+            )
+            rec = "CONDITIONAL"
+        es["empty_signal_warning"] = (
+            "No public-domain signal found for this vendor. The all-zero "
+            "scorecard does NOT mean the vendor is verified clean — it "
+            "means the system could not find substantive information. "
+            "Obtain KYC, GSTIN, and incorporation proof before relying on "
+            "this report."
+        )
+
+    data["recommendation"] = rec
 
 
 def normalize_legacy_vra_payload(
