@@ -67,6 +67,11 @@ _SEVERITY_TO_SCORE: dict[str, int] = {
     "":         0,
 }
 
+# Ordinal ranking of the three risk ratings, used to reconcile the
+# mechanically-derived rating with the LLM's own rating (see
+# _ensure_calibrated_rubric).
+_RATING_ORDER: dict[str, int] = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
 
 def _score_for_finding_text(text: str) -> int:
     """Bump score to 100 when the finding clearly cites a veto-class event."""
@@ -161,6 +166,14 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
     if not isinstance(es, dict):
         es = {}
         data["executive_summary"] = es
+
+    # Capture the LLM's own risk_rating *before* we recompute it. In hybrid mode
+    # this is `synthesis.risk_rating` (already capped HIGH→MEDIUM by
+    # build_vra_report when no GSTIN is verified); in the legacy/search path it
+    # is Gemini's summary field. We do not trust it as the source of truth, but
+    # we use it below as a one-directional floor so a flagged vendor can never be
+    # silently reported as LOW/PROCEED.
+    llm_rating = str(es.get("risk_rating") or "").upper()
 
     # 1. dimension_scores — if Gemini didn't return them, derive from findings.
     dim_raw = es.get("dimension_scores")
@@ -343,12 +356,15 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
         )
     es["confidence"] = conf
 
-    # 5. risk_rating — always use the mechanically computed rating.
-    # Gemini's risk_rating is NOT trusted: it hallucinates HIGH even when all
-    # per-section findings are INFO/LOW and veto=False.  The "never downgrade"
-    # rule was a safeguard for human reviewers; it does not apply to an LLM
-    # whose structured fields are systematically wrong.  The computed_rating
-    # from our derived dimension scores + veto flag is the single source of truth.
+    # 5. risk_rating — start from the mechanically computed rating, then apply a
+    # one-directional reconciliation against the LLM's rating (below).
+    # Gemini's risk_rating is NOT trusted to *lower* the rating, and it
+    # hallucinates HIGH even when all per-section findings are INFO/LOW and
+    # veto=False — so the computed rating from our derived dimension scores +
+    # veto flag remains the baseline. What changed: we no longer *discard* the
+    # LLM rating outright, because doing so could silently downgrade a genuinely
+    # high-risk vendor to LOW/PROCEED when its evidence reached us only as
+    # narrative (routed at MEDIUM) and its wording isn't in _EVENT_FLOORS.
     rr = _score_to_rating(score, dim, veto)
 
     # Narrative-vs-rating consistency check.  When fallback models (e.g.
@@ -392,6 +408,39 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
                 "Narrative cites HIGH-severity events but structured "
                 "dimensions are empty; promoted to MEDIUM with LOW confidence "
                 "for manual review.",
+            )
+
+    # LLM-rating floor. The block above only fires on a fixed veto-phrase list;
+    # this generalizes it to ANY case where the LLM's own structured rating
+    # outranks what our dimension scores produced. Because _score_to_rating
+    # already returns HIGH whenever the structured evidence supports it, an
+    # llm_rating that exceeds `rr` is by definition NOT corroborated by the
+    # per-section findings. We therefore reconcile *upward but cautiously*:
+    #   • never let the final rating sit below the LLM's rating (kills the
+    #     silent HIGH→LOW/PROCEED downgrade this guards against), but
+    #   • cap an unverified escalation at MEDIUM and drop confidence to LOW so
+    #     the recommendation becomes CONDITIONAL (manual review) — we do NOT
+    #     auto-REJECT on an unverifiable LLM HIGH, since Gemini is known to
+    #     hallucinate HIGH/veto on clean vendors.
+    if llm_rating in _RATING_ORDER and _RATING_ORDER[llm_rating] > _RATING_ORDER.get(rr, 0):
+        promoted = "MEDIUM" if llm_rating == "HIGH" else llm_rating
+        if _RATING_ORDER[promoted] > _RATING_ORDER.get(rr, 0):
+            logger.warning(
+                "_ensure_calibrated_rubric: LLM rated %s but derived dimensions "
+                "only support %s — promoting to %s + confidence=LOW so the "
+                "recommendation drops to CONDITIONAL. Structured evidence does "
+                "not independently corroborate the higher rating (likely sparse "
+                "web evidence routed as narrative).",
+                llm_rating, rr, promoted,
+            )
+            rr = promoted
+            conf = "LOW"
+            es["confidence"] = conf
+            es.setdefault(
+                "_rating_promoted_reason",
+                f"LLM assessed risk as {llm_rating} but automated dimension "
+                "scores could not corroborate it; promoted to MEDIUM with LOW "
+                "confidence for manual review rather than reported as low risk.",
             )
 
     es["risk_rating"] = rr
