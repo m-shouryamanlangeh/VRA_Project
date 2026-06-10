@@ -28,27 +28,47 @@ def _finding(point: str, severity: str = "INFO") -> Finding:
 # "insolvency", as the tiers intend).
 
 # 🔴 HIGH — veto-class adverse signals
+# Short/ambiguous tokens (e.g. FIR, ED) are written as phrases so the
+# word-boundary regex can't misfire on "fir tree" / a name "Ed".
 _HIGH_MARKERS = (
-    "arrested", "money laundering", "terror financing", "fraud", "cheating",
-    "pmla", "ed raid", "cbi case", "sfio probe", "sebi ban", "debarred",
-    "convicted", "insolvency", "wilful default", "ponzi", "scam",
-    "shell company", "black money", "enforcement directorate",
-    "look-out notice", "chargesheet", "hawala", "benami",
+    "arrested", "money laundering", "terror financing", "fraud", "fraudulent",
+    "defrauded", "cheating", "pmla", "ed raid", "ed probe", "ed summons",
+    "ed attaches", "cbi case", "cbi probe", "cbi raid", "sfio probe", "sebi ban",
+    "debarred", "blacklisted", "blacklist", "convicted", "conviction",
+    "insolvency", "wilful default", "wilful defaulter", "ponzi", "scam",
+    "shell company", "shell firm", "black money", "enforcement directorate",
+    "look-out notice", "lookout circular", "chargesheet", "charge sheet",
+    "hawala", "benami", "fir registered", "fir filed", "fir lodged",
+    "fir against", "fugitive", "absconding", "red corner notice",
+    "proceeds of crime", "attachment of assets", "asset attachment",
+    "criminal conspiracy", "criminal breach of trust", "forgery", "embezzled",
+    "siphoned", "siphoning", "diversion of funds", "round-tripping",
+    "loan fraud", "bank fraud", "disproportionate assets",
 )
 
 # 🟠 MEDIUM — serious red flags
 _MEDIUM_MARKERS = (
-    "probe", "investigation", "scrutiny", "notice", "penalty", "fine",
-    "gst fraud", "loan default", "npa", "non-performing", "tax evasion",
-    "raid", "search operation", "nclt", "liquidation", "winding-up",
-    "arbitration", "dispute", "allegation", "alleged", "whistleblower",
-    "irregularity", "misappropriation", "embezzlement",
+    "probe", "investigation", "scrutiny", "notice", "summons", "summoned",
+    "show cause", "show-cause", "penalty", "fine", "gst fraud", "loan default",
+    "npa", "non-performing", "tax evasion", "tax demand", "raid",
+    "search operation", "search and seizure", "nclt", "nclat", "ibc",
+    "liquidation", "winding-up", "winding up", "sarfaesi", "drt", "cibil",
+    "default notice", "recovery proceedings", "auction notice", "downgrade",
+    "rating cut", "rating downgrade", "negative outlook", "credit watch",
+    "going concern", "audit qualification", "qualified opinion",
+    "auditor resign", "data breach", "data leak", "ransomware",
+    "regulatory action", "rbi action", "sebi order", "violation",
+    "non-compliance", "arbitration", "dispute", "allegation", "alleged",
+    "whistleblower", "irregularity", "misappropriation", "embezzlement",
 )
 
 # 🟡 LOW — minor / civil signals
 _LOW_MARKERS = (
     "complaint", "pil", "legal battle", "court case", "suit filed",
-    "tribunal", "consumer complaint", "disagreement", "controversy",
+    "tribunal", "consumer complaint", "consumer court", "consumer forum",
+    "labour dispute", "service dispute", "defamation", "stay order",
+    "interim order", "warning", "advisory", "caution", "objection",
+    "disagreement", "controversy", "protest",
 )
 
 # Benign / informational language → keep INFO
@@ -254,7 +274,9 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     vendor_label = str(v.get("name") or "")
     gstin = str(v.get("gst") or "")
     gstin_verified = bool(GST_RE.match(gstin.strip().upper()))
-    for h in evidence.news_headlines[:20]:
+    # Surface the full collected battery (NewsCollector caps at MAX_HEADLINES=40),
+    # not just the first 20 — the goal is to report ALL of a vendor's negative news.
+    for h in evidence.news_headlines[:40]:
         title = str(h.get("title") or "")
         link = str(h.get("link") or entity_link)
         if not adverse_text_matches_vendor("", title, vendor_name=vendor_label, gst=gstin):
