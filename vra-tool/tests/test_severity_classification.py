@@ -30,10 +30,26 @@ from app.core.hybrid_report import _classify_snippet_severity
         # ✅ INFO — no risk signal
         ("Company launches new product line, posts record growth", "INFO"),
         ("No adverse records found for this vendor", "INFO"),
+        # ✅ INFO — vendor is the PROTECTOR, not the wrongdoer (false-positive guard)
+        ("Airtel Launches AI-Powered Fraud Alert to Protect Customers from OTP Scams", "INFO"),
+        ("Bharti Airtel: Spam and Scam Prevention with AI", "INFO"),
+        ("Digital Arrest Fraud Guide: Meaning, Risks and Safety Tips - Airtel", "INFO"),
+        ("Airtel strengthens bank fraud protections", "INFO"),
+        ("Bank rolls out new anti-fraud system to combat fraud", "INFO"),
     ],
 )
 def test_classify_snippet_severity(text: str, expected: str) -> None:
     assert _classify_snippet_severity(text) == expected
+
+
+def test_real_adverse_not_masked_by_benign_guard() -> None:
+    """The benign guard must not swallow genuine wrongdoing headlines."""
+    assert _classify_snippet_severity(
+        "Kingfisher Airlines loan fraud: CBI files chargesheet"
+    ) == "HIGH"
+    assert _classify_snippet_severity(
+        "Promoter arrested in bank fraud case, ED attaches assets"
+    ) == "HIGH"
 
 
 def test_word_boundary_does_not_misfire() -> None:

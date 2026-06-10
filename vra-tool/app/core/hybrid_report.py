@@ -77,6 +77,38 @@ _INFO_NEGATIONS = (
     "profitable", "growth", "expansion", "launches",
 )
 
+# Vendor-as-PROTECTOR / advisory headlines: these contain risk words ("fraud",
+# "scam", "arrest") but the vendor is OFFERING protection or PUBLISHING guidance,
+# not the subject of wrongdoing — e.g. "Airtel launches AI fraud-alert", "scam
+# prevention with AI", "digital-arrest safety tips". High-precision phrases only:
+# a company committing fraud is never described as selling "fraud protection".
+# When present, the item is benign regardless of which risk keyword also matched.
+_BENIGN_CONTEXT_MARKERS = (
+    # Anti-fraud products / advisories (vendor is the protector)
+    "fraud alert", "fraud protection", "fraud prevention", "fraud detection",
+    "fraud-blocking", "fraud blocking", "fraud awareness", "fraud guide",
+    "anti-fraud", "anti fraud", "scam prevention", "scam protection",
+    "scam-blocking", "scam blocking", "scam awareness", "scam guide",
+    "anti-scam", "anti scam", "safety tips", "protect customers",
+    "protect users", "protect consumers", "protection against",
+    "guard against", "shield against", "combat fraud", "fight fraud",
+    "curb fraud", "prevent fraud", "tackle fraud", "block scams",
+    # Exoneration / positive outcomes (vendor cleared)
+    "clean chit", "clean-chit", "acquitted", "exonerated", "cleared of",
+    "gives clean", "given clean", "no wrongdoing",
+)
+
+
+def _is_benign_security_headline(text: str) -> bool:
+    """True if the vendor is the protector/adviser, not the wrongdoer.
+
+    Used to keep anti-fraud product launches and safety advisories from being
+    mis-scored as adverse media (the classic false positive for telcos / banks /
+    fintechs whose security products surface under adverse-media queries).
+    """
+    t = (text or "").lower()
+    return any(m in t for m in _BENIGN_CONTEXT_MARKERS)
+
 
 def _compile_markers(markers: tuple[str, ...]) -> re.Pattern[str]:
     alternation = "|".join(re.escape(m) for m in markers)
@@ -102,6 +134,9 @@ def _classify_snippet_severity(text: str) -> str:
                                    "no sebi observ", "no wilful", "no going concern",
                                    "no ecourts", "no adverse")):
         return "INFO"
+    # Vendor is the protector/adviser, not the wrongdoer → not adverse.
+    if _is_benign_security_headline(t):
+        return "INFO"
     if _HIGH_RE.search(t):
         return "HIGH"
     if _MEDIUM_RE.search(t):
@@ -111,12 +146,11 @@ def _classify_snippet_severity(text: str) -> str:
     return "INFO"
 
 
-def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
-    """Severity for a news headline.
+def _llm_severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str | None:
+    """Return the LLM-mapped severity (HIGH/MEDIUM/LOW) for a headline, else None.
 
-    Prefer an explicit LLM-provided mapping row; otherwise fall back to the
-    keyword brain. A headline returned by the adverse queries that matches no
-    risk keyword is recorded as LOW (a returned hit is, at minimum, low signal).
+    The LLM sees full context, so an explicit mapping always wins over keyword
+    heuristics — including the benign-context guard.
     """
     t = (title or "").strip().lower()
     for row in mapping:
@@ -125,6 +159,19 @@ def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
             s = str(row.get("severity") or "MEDIUM").upper()
             if s in ("HIGH", "MEDIUM", "LOW"):
                 return s
+    return None
+
+
+def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
+    """Severity for a news headline.
+
+    Prefer an explicit LLM-provided mapping row; otherwise fall back to the
+    keyword brain. A headline returned by the adverse queries that matches no
+    risk keyword is recorded as LOW (a returned hit is, at minimum, low signal).
+    """
+    llm = _llm_severity_for_title(title, mapping)
+    if llm:
+        return llm
     kw = _classify_snippet_severity(title)
     return kw if kw in ("HIGH", "MEDIUM", "LOW") else "LOW"
 
@@ -280,6 +327,11 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
         title = str(h.get("title") or "")
         link = str(h.get("link") or entity_link)
         if not adverse_text_matches_vendor("", title, vendor_name=vendor_label, gst=gstin):
+            continue
+        # Drop vendor-as-protector / advisory headlines (e.g. "Airtel launches AI
+        # fraud-alert") — they surface under adverse-media queries but are not
+        # adverse. Skip unless the LLM explicitly mapped this title to a severity.
+        if _is_benign_security_headline(title) and _llm_severity_for_title(title, sev_map) is None:
             continue
         sev = _severity_for_title(title, sev_map)
         # RSS + name-only OSINT: never flag a headline as HIGH without a verified GSTIN match path.
