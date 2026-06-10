@@ -3,8 +3,12 @@ import { useToast } from "../ToastContext.jsx";
 import {
   apiFetch,
   clearStoredGeminiKey,
+  DEFAULT_MODEL,
   getStoredGeminiKey,
+  getStoredModel,
+  MODEL_OPTIONS,
   setStoredGeminiKey,
+  setStoredModel,
 } from "../api.js";
 
 // Browser-local key UI — replaces the server-stored key flow for multi-tenant
@@ -214,6 +218,212 @@ function BrowserKeyCard() {
   );
 }
 
+// Per-browser LLM model picker — mirrors BrowserKeyCard. The choice is stored
+// only in this browser's localStorage and rides along as X-Llm-Model on every
+// request (see api.js). The list is fetched live from /api/models (the models
+// your key can actually run); it falls back to a static list when offline.
+// No "Save" needed; selecting applies immediately.
+function ModelCard() {
+  const { showToast } = useToast();
+  const [model, setModel] = useState(getStoredModel());
+  const [options, setOptions] = useState(MODEL_OPTIONS);
+  const [recommended, setRecommended] = useState(DEFAULT_MODEL);
+  const [source, setSource] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/models");
+        const data = await res.json();
+        if (alive && Array.isArray(data.models) && data.models.length) {
+          setOptions(data.models);
+          if (data.recommended) setRecommended(data.recommended);
+          setSource(data.source || "");
+        }
+      } catch {
+        /* keep the static fallback list */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  function onChange(e) {
+    const v = e.target.value;
+    setStoredModel(v);
+    setModel(v);
+    const label = (options.find((o) => o.value === v)?.label || v).split(" — ")[0];
+    showToast(`Model set to ${label} for this browser.`, true);
+  }
+
+  // Always show the saved selection, even if a live list (from a different key)
+  // doesn't include it.
+  const shown = options.some((o) => o.value === model)
+    ? options
+    : [{ value: model, label: model }, ...options];
+
+  return (
+    <section className="mt-6 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <header className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-paytm-blue/10 to-transparent">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-paytm-blue/10 text-paytm-blue flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <rect x="9" y="9" width="6" height="6" />
+                <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-paytm-dark leading-tight">
+                LLM Model
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Which Gemini model generates your reports. Applies to this browser only.
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-paytm-blue bg-paytm-blue/10 px-2.5 py-1 rounded-full uppercase whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-paytm-blue"></span>
+            Browser-only
+          </span>
+        </div>
+      </header>
+
+      <div className="p-6 space-y-3">
+        <label className="block">
+          <span className="text-sm font-medium text-paytm-dark">Model</span>
+          <select
+            value={model}
+            onChange={onChange}
+            className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm bg-white focus:border-paytm-blue focus:ring-2 focus:ring-paytm-blue/20 focus:outline-none transition-colors"
+          >
+            {shown.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+                {o.value === recommended ? " — recommended" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="text-xs text-slate-500">
+          {source === "live"
+            ? `${options.length} models available for your key. `
+            : "Showing default models — add your API key above to list every model your key can run. "}
+          <span className="font-medium text-paytm-dark">Flash</span> models are fastest and
+          lightest on quota; <span className="font-medium text-paytm-dark">Pro</span> is slower
+          but stronger. Your selection is sent only alongside your own API key.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+// Usage readout. Google's Gemini API exposes no remaining-quota/token endpoint,
+// so this shows consumption the portal has logged (from the audit trail) plus
+// the configurable free-tier daily request budget — not a live balance.
+function UsageCard() {
+  const [usage, setUsage] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await apiFetch("/api/usage");
+      if (res.ok) setUsage(await res.json());
+    } catch {
+      /* leave usage null → render a friendly fallback */
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const fmt = (n) => (n ?? 0).toLocaleString();
+  const today = usage?.today || { generations: 0, tokens: 0 };
+  const all = usage?.all_time || { generations: 0, tokens: 0 };
+  const limit = usage?.daily_limit || 1500;
+  const pct = Math.min(100, Math.round(((today.generations || 0) / limit) * 100));
+
+  return (
+    <section className="mt-6 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <header className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-paytm-blue/10 to-transparent">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-paytm-blue/10 text-paytm-blue flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                <path d="M3 3v18h18" />
+                <path d="M18 17V9M13 17V5M8 17v-3" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-paytm-dark leading-tight">
+                Usage today
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Tokens and reports this portal has used. Resets daily (UTC).
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading}
+            className="text-sm text-paytm-blue hover:text-paytm-dark font-medium transition-colors disabled:opacity-50"
+          >
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+      </header>
+
+      <div className="p-6 space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3">
+            <div className="text-2xl font-bold text-paytm-dark tabular-nums">
+              {fmt(today.tokens)}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">tokens used today</div>
+          </div>
+          <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3">
+            <div className="text-2xl font-bold text-paytm-dark tabular-nums">
+              {fmt(today.generations)}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">reports generated today</div>
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between text-xs text-slate-600 mb-1.5">
+            <span>Daily request budget (free tier)</span>
+            <span className="tabular-nums font-medium text-paytm-dark">
+              {fmt(today.generations)} / {fmt(limit)}
+            </span>
+          </div>
+          <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${pct >= 80 ? "bg-amber-500" : "bg-paytm-blue"}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+
+        <p className="text-xs text-slate-500">
+          All-time: {fmt(all.generations)} reports · {fmt(all.tokens)} tokens.{" "}
+          <span className="text-slate-400">
+            Google doesn't publish a key's remaining balance, so this is the portal's own
+            count — the real free-tier cap varies by model.
+          </span>
+        </p>
+      </div>
+    </section>
+  );
+}
+
 const DEFAULT_STATE = {
   llm_provider: "gemini",
   llm_model: "gemini-2.0-flash",
@@ -227,12 +437,6 @@ const DEFAULT_STATE = {
   last_generation_at: null,
   fernet_configured: true,
 };
-
-const MODEL_OPTIONS = [
-  { value: "gemini-2.0-flash", label: "gemini-2.0-flash (default)" },
-  { value: "gemini-2.0-flash-001", label: "gemini-2.0-flash-001" },
-  { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
-];
 
 function KeyRow({ k, onStage, onUnstage, onDelete }) {
   const [editing, setEditing] = useState(false);
@@ -507,6 +711,12 @@ export default function SettingsPage() {
 
       {/* Browser-local key — the new multi-tenant flow */}
       <BrowserKeyCard />
+
+      {/* Browser-local LLM model picker */}
+      <ModelCard />
+
+      {/* Token / generation usage readout */}
+      <UsageCard />
 
       {/*
         The server-stored "API keys" + "Advanced" sections were removed —

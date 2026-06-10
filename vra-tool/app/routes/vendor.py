@@ -36,6 +36,7 @@ async def generate_report(
     body: VendorGenerateRequest,
     db: Session = Depends(get_db),
     x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
+    x_llm_model: str | None = Header(default=None, alias="X-Llm-Model"),
 ) -> VendorGenerateResponse:
     """Run full OSINT VRA pipeline and return structured JSON + PDF link.
 
@@ -52,6 +53,7 @@ async def generate_report(
             org_type=(body.org_type or "Unknown").strip() or "Unknown",
             request_type="SINGLE",
             user_api_key=x_gemini_api_key,
+            user_model=x_llm_model,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -80,6 +82,7 @@ async def generate_batch(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
+    x_llm_model: str | None = Header(default=None, alias="X-Llm-Model"),
 ) -> StreamingResponse:
     """
     Accept an Excel file with columns ``vendor_name``, ``org_type``; ``gst`` is optional.
@@ -167,6 +170,7 @@ async def generate_batch(
                     org_type=req.org_type,
                     request_type="BATCH",
                     user_api_key=x_gemini_api_key,
+                    user_model=x_llm_model,
                 )
                 pdf_path = WRITABLE_DIR / rel
                 if pdf_path.is_file():

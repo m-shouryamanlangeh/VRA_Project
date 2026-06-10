@@ -38,19 +38,57 @@ export function clearStoredGeminiKey() {
   }
 }
 
+// ── LLM model selection (per-browser, like the key) ─────────────────────────
+// The chosen model lives only in this browser's localStorage and is sent as the
+// X-Llm-Model request header. The backend honors it only if it's an allowlisted
+// model (see GEMINI_MODEL_CHOICES in app/core/vra_service.py); otherwise it
+// falls back to the server default. Keep these values in sync with that list.
+export const MODEL_STORAGE = "vra_llm_model";
+
+export const DEFAULT_MODEL = "gemini-2.5-flash";
+
+export const MODEL_OPTIONS = [
+  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash — best quality (default)" },
+  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash — faster, lower cost" },
+  { value: "gemini-2.0-flash-001", label: "Gemini 2.0 Flash 001 — pinned build" },
+];
+
+export function getStoredModel() {
+  try {
+    return (localStorage.getItem(MODEL_STORAGE) || "").trim() || DEFAULT_MODEL;
+  } catch {
+    return DEFAULT_MODEL;
+  }
+}
+
+export function setStoredModel(model) {
+  try {
+    const v = (model || "").trim();
+    // Only persist a non-default choice; default → clear so no header is sent.
+    if (v && v !== DEFAULT_MODEL) localStorage.setItem(MODEL_STORAGE, v);
+    else localStorage.removeItem(MODEL_STORAGE);
+  } catch {
+    /* ignore localStorage write failures */
+  }
+}
+
 export function apiUrl(path) {
   return `${BASE_URL}${path}`;
 }
 
-// apiFetch automatically attaches the X-Gemini-Api-Key header on every
-// request when a key is stored in localStorage. Override by passing an
-// init.headers object that explicitly omits the header (e.g. {"X-Gemini-Api-Key": ""}).
+// apiFetch automatically attaches the X-Gemini-Api-Key and X-Llm-Model headers
+// on every request from this browser's localStorage. Override either by passing
+// an init.headers object that explicitly sets it (e.g. {"X-Gemini-Api-Key": ""}).
 export function apiFetch(path, init) {
   const opts = init ? { ...init } : {};
   const headers = new Headers(opts.headers || {});
   if (!headers.has("X-Gemini-Api-Key")) {
     const key = getStoredGeminiKey();
     if (key) headers.set("X-Gemini-Api-Key", key);
+  }
+  if (!headers.has("X-Llm-Model")) {
+    const model = getStoredModel();
+    if (model) headers.set("X-Llm-Model", model);
   }
   opts.headers = headers;
   return fetch(apiUrl(path), opts);

@@ -445,6 +445,33 @@ _UNSUPPORTED_MODEL_IDS = frozenset(
 )
 
 
+# Markers that disqualify a model from the *user-facing* chat/synthesis picker.
+# fetch_live_generate_content_model_ids() is intentionally lenient (a wrong pick
+# just fails over during routing), but the Settings dropdown must only offer real
+# Gemini text models — no image/audio/agentic/embedding families.
+_NON_CHAT_MODEL_MARKERS = (
+    "image", "nano-banana", "tts", "audio", "vision", "embedding", "embed",
+    "lyria", "robotics", "computer-use", "antigravity", "deep-research",
+    "imagen", "video", "-live", "live-", "aqa", "bison", "gecko", "customtools",
+)
+
+
+def is_selectable_generate_content_model(model_id: str) -> bool:
+    """Strict filter: a Gemini text model a user may pick for VRA synthesis.
+
+    Used both to populate the Settings dropdown and to validate a per-request
+    ``X-Llm-Model`` override, so the two never drift apart.
+    """
+    sid = (model_id or "").strip().replace("models/", "").lower()
+    if not sid.startswith("gemini"):
+        return False  # excludes gemma / lyria / deep-research / nano-banana / antigravity
+    if sid in _UNSUPPORTED_MODEL_IDS:
+        return False
+    if _skip_model_for_standard_generate_content(sid):
+        return False  # excludes gemini-3*preview, -image, -tts, …
+    return not any(m in sid for m in _NON_CHAT_MODEL_MARKERS)
+
+
 def _short_model_id(full_name: Optional[str]) -> str:
     if not full_name:
         return ""

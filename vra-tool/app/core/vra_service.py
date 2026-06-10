@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 from app.config import settings as app_settings
 from app.core.crypto import decrypt_secret
 from app.core.kv_store import get_value, next_pdf_sequence, set_value
-from app.core.llm.gemini import GeminiProvider, is_retryable_with_fallback, resolve_model_candidates
+from app.core.llm.gemini import (
+    GeminiProvider,
+    is_retryable_with_fallback,
+    is_selectable_generate_content_model,
+    resolve_model_candidates,
+)
 from app.core.llm.openrouter import OpenRouterProvider
 from app.core.pdf_generator import render_vra_pdf
 from app.core.collectors import gather_evidence
@@ -514,6 +519,16 @@ _DEFAULT_MODEL: dict[str, str] = {
     "openrouter": "openai/gpt-oss-120b:free",
 }
 
+# Offline fallback model list for the Settings dropdown — used only when the
+# live ListModels call fails (no key / offline). The real list is fetched from
+# the API (see GET /api/models). A per-request X-Llm-Model override is validated
+# with is_selectable_generate_content_model(), not against this tuple.
+GEMINI_MODEL_CHOICES: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+)
+
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -529,6 +544,7 @@ async def generate_vra_bundle(
     verify_urls: bool = True,
     user: str = "system",
     user_api_key: str | None = None,
+    user_model: str | None = None,
 ) -> tuple[VRAReport, str, AuditLog]:
     """
     Full pipeline: primary + adverse LLM passes, validation, PDF, audit row.
@@ -553,6 +569,15 @@ async def generate_vra_bundle(
 
     default_model = _DEFAULT_MODEL.get(provider, "gemini-2.5-flash")
     model = get_value(db, "llm_model", default_model)
+    # Per-request, browser-local model override (sent as X-Llm-Model). Honored
+    # only for Gemini and only when it's an allowlisted choice — otherwise we
+    # keep the server default so a stale localStorage value can't break a run.
+    requested_model = (user_model or "").strip()
+    if provider == "gemini" and is_selectable_generate_content_model(requested_model):
+        model = requested_model
+        logger.info("Using browser-selected model: %s", model)
+    elif requested_model:
+        logger.info("Ignoring unsupported X-Llm-Model=%r; using %s", requested_model, model)
     # Temperature 0.0 — the same vendor must produce the same structured output
     # across runs. With temp > 0 we saw Paytm classified as LOW/PROCEED on one
     # run and MEDIUM/CONDITIONAL on the next, 21 minutes apart, same prompt.

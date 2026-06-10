@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.kv_store import get_value
 from app.database import get_db
 from app.models import AuditLog
 from app.schemas import AuditListResponse
@@ -82,6 +83,44 @@ def api_audit_list(
         for r in rows
     ]
     return AuditListResponse(total=total, page=page, page_size=page_size, items=items)
+
+
+@router.get("/api/usage")
+def api_usage(db: Session = Depends(get_db)) -> dict:
+    """Token + generation usage recorded by this portal.
+
+    IMPORTANT: Google's Gemini API does not expose a key's remaining quota or
+    token balance — there is no endpoint for it; limits surface only as 429s.
+    So this reports *consumption the app has logged* (from the audit trail),
+    plus the configurable free-tier daily request budget for context — not a
+    live balance fetched from Google.
+    """
+    now = datetime.utcnow()
+    start_today = datetime(now.year, now.month, now.day)
+
+    def _agg(since: datetime | None) -> tuple[int, int]:
+        stmt = select(
+            func.count(AuditLog.id),
+            func.coalesce(func.sum(AuditLog.tokens_used), 0),
+        )
+        if since is not None:
+            stmt = stmt.where(AuditLog.timestamp >= since)
+        gens, toks = db.execute(stmt).one()
+        return int(gens or 0), int(toks or 0)
+
+    gens_today, tokens_today = _agg(start_today)
+    gens_all, tokens_all = _agg(None)
+    daily_limit = int(get_value(db, "daily_quota_limit", "1500"))
+    return {
+        "today": {
+            "date": start_today.date().isoformat(),
+            "generations": gens_today,
+            "tokens": tokens_today,
+        },
+        "all_time": {"generations": gens_all, "tokens": tokens_all},
+        "daily_limit": daily_limit,
+        "remaining_estimate": max(0, daily_limit - gens_today),
+    }
 
 
 @router.get("/api/audit/export.csv")

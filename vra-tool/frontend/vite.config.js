@@ -13,13 +13,18 @@ const API_PATHS = [
   "/health",
 ];
 
+// Backend the dev proxy forwards API calls to. Defaults to the standard
+// run.sh port (8000); override with VITE_PROXY_TARGET when the backend runs
+// elsewhere (e.g. VITE_PROXY_TARGET=http://127.0.0.1:8001 npm run dev).
+const PROXY_TARGET = process.env.VITE_PROXY_TARGET || "http://127.0.0.1:8000";
+
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: API_PATHS.reduce((acc, p) => {
       acc[p] = {
-        target: "http://127.0.0.1:8000",
+        target: PROXY_TARGET,
         changeOrigin: true,
       };
       return acc;

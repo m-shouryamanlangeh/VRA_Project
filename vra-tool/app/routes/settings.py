@@ -12,9 +12,13 @@ from sqlalchemy.orm import Session
 from app.core.crypto import CryptoError, encrypt_secret, get_fernet
 from app.core.kv_store import get_value, set_value
 from app.core.llm.factory import get_provider
-from app.core.llm.gemini import GeminiProvider
+from app.core.llm.gemini import (
+    GeminiProvider,
+    fetch_live_generate_content_model_ids,
+    is_selectable_generate_content_model,
+)
 from app.core.quota import attach_usage_to_keys
-from app.core.vra_service import build_gemini_key_candidates
+from app.core.vra_service import GEMINI_MODEL_CHOICES, build_gemini_key_candidates
 from app.database import get_db
 from app.models import ApiKey
 from app.schemas import SettingsSaveRequest, SettingsStateResponse
@@ -76,6 +80,56 @@ def _settings_state(db: Session) -> SettingsStateResponse:
 @router.get("/api/settings", response_model=SettingsStateResponse)
 def api_settings_get(db: Session = Depends(get_db)) -> SettingsStateResponse:
     return _settings_state(db)
+
+
+# Recommended default surfaced first in the picker.
+_RECOMMENDED_MODEL = "gemini-2.5-flash"
+
+
+def _prettify_model(model_id: str) -> str:
+    """Turn ``gemini-2.5-flash-lite`` → ``Gemini 2.5 Flash Lite`` for display."""
+    words = []
+    for part in model_id.split("-"):
+        if not part:
+            continue
+        # Keep version/build tokens (2.5, 001) verbatim; title-case word tokens.
+        words.append(part.capitalize() if part.isalpha() else part)
+    return " ".join(words) or model_id
+
+
+@router.get("/api/models")
+async def api_models(
+    db: Session = Depends(get_db),
+    x_gemini_api_key: str | None = Header(default=None, alias="X-Gemini-Api-Key"),
+) -> dict:
+    """List Gemini text models the caller's key can use, for the Settings picker.
+
+    Live from the Gemini ListModels API (using the browser-local key when sent,
+    else DB/ENV), filtered to chat/synthesis models. Falls back to a small static
+    list when no key is available or the API call fails.
+    """
+    ids: list[str] = []
+    source = "fallback"
+    candidates = build_gemini_key_candidates(db, user_api_key=x_gemini_api_key)
+    if candidates:
+        _row, secret, _label = candidates[0]
+        try:
+            live = await fetch_live_generate_content_model_ids(secret)
+            ids = [m for m in live if is_selectable_generate_content_model(m)]
+            if ids:
+                source = "live"
+        except Exception as exc:  # network / SDK / auth — degrade gracefully
+            logger.warning("api_models ListModels failed: %s", exc)
+
+    if not ids:
+        ids = list(GEMINI_MODEL_CHOICES)
+
+    # De-dupe and surface the recommended default first.
+    ordered = ([_RECOMMENDED_MODEL] if _RECOMMENDED_MODEL in ids else []) + [
+        m for m in ids if m != _RECOMMENDED_MODEL
+    ]
+    models = [{"value": m, "label": _prettify_model(m)} for m in ordered]
+    return {"models": models, "recommended": _RECOMMENDED_MODEL, "source": source}
 
 
 @router.post("/api/settings")
