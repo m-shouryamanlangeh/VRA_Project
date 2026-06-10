@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.core.adverse_relevance import adverse_text_matches_vendor
@@ -19,33 +20,35 @@ def _finding(point: str, severity: str = "INFO") -> Finding:
     return Finding(point=point, source=_PLACEHOLDER_SOURCE, severity=severity)  # type: ignore[arg-type]
 
 
-# Veto-class keywords → severity=HIGH (also bump dimension to 100 via report_normalization)
+# ── Severity classification brain (stakeholder-owned keyword tiers) ───────────
+# Matching is word-boundary (regex) so short tokens like "raid"/"fine"/"npa"/
+# "pil" don't fire inside unrelated words ("afraid", "defined", "company",
+# "pile"). HIGH is checked before MEDIUM before LOW; the first tier to match wins
+# (so "gst fraud" → HIGH via "fraud", "insolvency petition" → HIGH via
+# "insolvency", as the tiers intend).
+
+# 🔴 HIGH — veto-class adverse signals
 _HIGH_MARKERS = (
-    "wilful default", "willful default",
-    "ofac", "un sanction", "uapa",
-    "ed chargesheet", "pmla", "sfio", "cbi chargesheet",
-    "sebi debarment", "debarred",
-    "cirp admitted", "insolvency admitted", "liquidation order",
-    "gst cancelled", "gstin cancelled", "fake invoic",
-    "convicted", "conviction",
-    "struck off", "struck-off", "disqualified director",
-    "licence cancelled", "licence revoked", "license cancelled", "license revoked",
-    "banking licence", "banking license",
-    "money laundering", "fema violation", "forex violation",
-    "founder arrested", "director arrested", "promoter arrested",
-    "fraud", "scam", "embezzle",
+    "arrested", "money laundering", "terror financing", "fraud", "cheating",
+    "pmla", "ed raid", "cbi case", "sfio probe", "sebi ban", "debarred",
+    "convicted", "insolvency", "wilful default", "ponzi", "scam",
+    "shell company", "black money", "enforcement directorate",
+    "look-out notice", "chargesheet", "hawala", "benami",
 )
 
-# Moderate red flags → severity=MEDIUM
+# 🟠 MEDIUM — serious red flags
 _MEDIUM_MARKERS = (
-    "penalty", "fine imposed", "show cause notice", "investigation",
-    "downgrade", "rating revised", "negative outlook",
-    "default", "npa ", "sarfaesi", "drt ",
-    "nclt", "insolvency petition", "winding up",
-    "raid", "search and seizure",
-    "lawsuit", "litigation", "court case",
-    "data breach", "data theft", "ransomware",
-    "regulatory action", "rbi action", "rbi penalty",
+    "probe", "investigation", "scrutiny", "notice", "penalty", "fine",
+    "gst fraud", "loan default", "npa", "non-performing", "tax evasion",
+    "raid", "search operation", "nclt", "liquidation", "winding-up",
+    "arbitration", "dispute", "allegation", "alleged", "whistleblower",
+    "irregularity", "misappropriation", "embezzlement",
+)
+
+# 🟡 LOW — minor / civil signals
+_LOW_MARKERS = (
+    "complaint", "pil", "legal battle", "court case", "suit filed",
+    "tribunal", "consumer complaint", "disagreement", "controversy",
 )
 
 # Benign / informational language → keep INFO
@@ -55,9 +58,20 @@ _INFO_NEGATIONS = (
 )
 
 
+def _compile_markers(markers: tuple[str, ...]) -> re.Pattern[str]:
+    alternation = "|".join(re.escape(m) for m in markers)
+    return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+
+
+_HIGH_RE = _compile_markers(_HIGH_MARKERS)
+_MEDIUM_RE = _compile_markers(_MEDIUM_MARKERS)
+_LOW_RE = _compile_markers(_LOW_MARKERS)
+
+
 def _classify_snippet_severity(text: str) -> str:
-    """Classify a web-search snippet by keyword markers.
-    Returns HIGH / MEDIUM / INFO so dimension scorer can pick it up.
+    """Classify a snippet/headline by the keyword brain.
+
+    Returns HIGH / MEDIUM / LOW / INFO. INFO means no risk keyword matched.
     """
     t = (text or "").lower()
     if not t:
@@ -68,14 +82,22 @@ def _classify_snippet_severity(text: str) -> str:
                                    "no sebi observ", "no wilful", "no going concern",
                                    "no ecourts", "no adverse")):
         return "INFO"
-    if any(m in t for m in _HIGH_MARKERS):
+    if _HIGH_RE.search(t):
         return "HIGH"
-    if any(m in t for m in _MEDIUM_MARKERS):
+    if _MEDIUM_RE.search(t):
         return "MEDIUM"
+    if _LOW_RE.search(t):
+        return "LOW"
     return "INFO"
 
 
 def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
+    """Severity for a news headline.
+
+    Prefer an explicit LLM-provided mapping row; otherwise fall back to the
+    keyword brain. A headline returned by the adverse queries that matches no
+    risk keyword is recorded as LOW (a returned hit is, at minimum, low signal).
+    """
     t = (title or "").strip().lower()
     for row in mapping:
         rt = str(row.get("title") or row.get("headline") or "").strip().lower()
@@ -83,7 +105,8 @@ def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
             s = str(row.get("severity") or "MEDIUM").upper()
             if s in ("HIGH", "MEDIUM", "LOW"):
                 return s
-    return "MEDIUM"
+    kw = _classify_snippet_severity(title)
+    return kw if kw in ("HIGH", "MEDIUM", "LOW") else "LOW"
 
 
 def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date_str: str) -> VRAReport:

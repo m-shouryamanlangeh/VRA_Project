@@ -60,11 +60,12 @@ async def test_gst_lookup_skips_when_no_gstin() -> None:
     assert r.status == "skipped"
 
 
-def test_google_news_rss_adds_india_when_name_only() -> None:
-    u = _google_news_rss_url("Some Vendor", name_only_osint=True)
-    assert "India" in u
-    u2 = _google_news_rss_url("Some Vendor", name_only_osint=False)
-    assert "India" not in u2
+def test_google_news_rss_builds_quoted_spec_query() -> None:
+    from app.core.collectors.news_collector import _GOOGLE_NEWS_TERMS
+
+    u = _google_news_rss_url("Some Vendor", _GOOGLE_NEWS_TERMS[0])
+    assert "%22Some+Vendor%22" in u
+    assert "fraud" in u and "CBI" in u and "SEBI" in u
 
 
 @pytest.mark.asyncio
@@ -88,11 +89,15 @@ async def test_news_collector_parses_feed() -> None:
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
-    with patch("app.core.collectors.news_collector.httpx.AsyncClient", return_value=mock_client):
+    # Patch the shared DDG/Serper dispatcher so the unit test stays offline.
+    with patch("app.core.collectors.news_collector.httpx.AsyncClient", return_value=mock_client), \
+         patch("app.core.collectors.news_collector._search", new=AsyncMock(return_value=[])):
         r = await NewsCollector().collect("ACME LTD", "27ADKFS8129B1ZY", "Private Limited")
 
     assert r.status == "ok"
+    # The three RSS feeds return the same mocked item; dedupe collapses to one.
     assert r.data["headlines"][0]["title"] == "Test fraud case"
+    assert len(r.data["headlines"]) == 1
 
 
 def test_fuzzy_match_vendor_not_substring_of_other() -> None:
