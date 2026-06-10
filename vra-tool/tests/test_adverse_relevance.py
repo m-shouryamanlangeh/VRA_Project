@@ -38,6 +38,34 @@ def test_gst_in_blob_matches() -> None:
     )
 
 
+def test_single_token_vendor_matches_real_adverse_media() -> None:
+    """One-word vendor names (KINGFISHER, PAYTM) must surface their adverse media.
+
+    Regression: the single-token branch used length-sensitive token_sort_ratio,
+    which scored a ~10-char name against a full headline at ~20 (< 78) and
+    silently rejected EVERY real headline — Kingfisher's ED/CBI/wilful-default
+    news produced zero findings and an all-LOW report.
+    """
+    for headline in (
+        "Kingfisher Airlines fraud: ED attaches Vijay Mallya assets worth Rs 14,000 crore",
+        "CBI files chargesheet against Kingfisher Airlines in IDBI loan default case",
+        "Vijay Mallya declared wilful defaulter over Kingfisher loans",
+    ):
+        assert adverse_text_matches_vendor("", headline, vendor_name="KINGFISHER", gst="")
+    assert adverse_text_matches_vendor(
+        "", "Paytm Payments Bank fined by RBI for KYC violations",
+        vendor_name="PAYTM", gst="",
+    )
+
+
+def test_single_token_whole_word_guard() -> None:
+    """A short single token must match as a whole word, not as a substring."""
+    # "MART" must not hit inside "WALMART".
+    assert not adverse_text_matches_vendor(
+        "", "Walmart opens new fulfilment centre in Texas", vendor_name="MART", gst="",
+    )
+
+
 def test_scandal_with_shared_token_not_same_company() -> None:
     """Single shared distinctive token (e.g. SARADHA) must not match without other tokens / GST."""
     vendor = "Saradha Constructions Company Pvt Ltd"

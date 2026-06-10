@@ -42,6 +42,12 @@ class AppSettings(BaseSettings):
 
     FERNET_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    # Optional Serper.dev (Google Search API) key. When blank, the web-search
+    # collector falls back to DuckDuckGo. This field MUST exist even when unset:
+    # web_search_collector reads app_settings.SERPER_API_KEY unconditionally, so
+    # a missing attribute raised AttributeError and silently crashed the entire
+    # collector (emptying the evidence pack). Also surfaced via serper_configured.
+    SERPER_API_KEY: str = ""
     APP_HOST: str = "127.0.0.1"
     APP_PORT: int = 8000
     LOG_LEVEL: str = "INFO"

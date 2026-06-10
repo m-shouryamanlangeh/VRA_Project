@@ -102,6 +102,17 @@ def adverse_text_matches_vendor(
         return fuzz.partial_ratio(vn_upper, blob_compact.upper()) >= 66
 
     if len(toks) == 1:
-        return toks[0] in blob and fuzz.token_sort_ratio(vn_upper, blob_compact) >= 78
+        # Single-word vendor name (e.g. "KINGFISHER", "PAYTM"): the one
+        # distinctive token is all we have. Require it as a WHOLE word — so a
+        # short token can't hit inside a larger word ("MART" → "WALMART") — and
+        # score with partial_ratio like the multi-token branches.
+        #
+        # NOTE: previously this used token_sort_ratio, which is length-sensitive
+        # — comparing a ~10-char name against a full headline scored ~20, far
+        # below 78, so it silently rejected EVERY real headline for one-word
+        # vendors (Kingfisher's ED/CBI/wilful-default news scored 0 findings).
+        if not re.search(rf"\b{re.escape(toks[0])}\b", blob):
+            return False
+        return fuzz.partial_ratio(vn_upper, blob_compact.upper()) >= 78
 
     return fuzz.token_set_ratio(vn_upper, blob_compact) >= 82

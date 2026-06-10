@@ -593,14 +593,27 @@ async def generate_vra_bundle(
             total_web_snippets = sum(
                 len(v) for v in (evidence.web_search_results or {}).values()
             )
-            # Only fall back to pure knowledge mode when web search returned ZERO results.
-            # Even 1–4 snippets are passed through the synthesis path so real findings
-            # (e.g. NCLT case snippets, Scribd loan-default docs) are not discarded.
-            evidence_is_sparse = total_web_snippets == 0
+            news_count = len(evidence.news_headlines or [])
+            web_sparse = total_web_snippets == 0
 
-            if evidence_is_sparse:
+            # Fall back to the LLM-only path ONLY when there is no structured
+            # signal at all — neither web snippets NOR news headlines. Google
+            # News RSS works even on cloud hosts where DuckDuckGo egress is
+            # blocked, so abundant headlines (e.g. Kingfisher: ED/CBI/wilful
+            # default) MUST drive the report through build_vra_report instead of
+            # being discarded. Counting only web snippets sent news-rich vendors
+            # into the grounded-only fallback and produced an all-zero scorecard.
+            no_structured_signal = web_sparse and news_count == 0
+
+            if web_sparse and not no_structured_signal:
+                logger.info(
+                    "Web search returned 0 snippets but %d news headlines present "
+                    "— using synthesis path with search grounding (vendor=%s).",
+                    news_count, vendor_name,
+                )
+            elif no_structured_signal:
                 logger.warning(
-                    "Web search returned 0 snippets — falling back to LLM-knowledge mode",
+                    "No web snippets and no news headlines — falling back to LLM-knowledge mode",
                 )
             elif total_web_snippets < 10:
                 logger.warning(
@@ -608,7 +621,7 @@ async def generate_vra_bundle(
                     total_web_snippets,
                 )
 
-            if evidence_is_sparse and provider == "openrouter":
+            if no_structured_signal and provider == "openrouter":
                 # OpenRouter free models have no live search plugin.
                 # Use the knowledge-mode prompt: asks the model to reason from
                 # training data instead of pretending to search the internet.
@@ -639,7 +652,7 @@ async def generate_vra_bundle(
                 )
                 report = _ensure_vendor(VRAReport.model_validate(main_raw), vendor_name, gst, org_type)
                 tok2 = 0
-            elif evidence_is_sparse and provider == "gemini":
+            elif no_structured_signal and provider == "gemini":
                 # Web search collector (DuckDuckGo) is reliably blocked on cloud
                 # hosts (Render, AWS Lambda, etc.). When it returns 0 snippets we
                 # cannot synthesize per-section findings from evidence — they
@@ -698,7 +711,11 @@ async def generate_vra_bundle(
                     max_output_tokens=max_output_tokens,
                     prompt=synthesis_prompt,
                     schema=SynthesisResult,
-                    use_search=evidence_is_sparse,  # enable Gemini grounding when evidence sparse
+                    # Turn on Gemini grounding whenever web search came back empty
+                    # (cloud DDG block) — it complements the news headlines that
+                    # are now driving this path instead of routing to the
+                    # grounded-only fallback.
+                    use_search=web_sparse,
                 )
                 report = build_vra_report(
                     evidence,
