@@ -52,8 +52,15 @@ class AppSettings(BaseSettings):
     APP_PORT: int = 8000
     LOG_LEVEL: str = "INFO"
     DATABASE_URL: str = ""
-    # Hybrid pipeline: collectors + compact synthesis (no search grounding).
-    USE_HYBRID_MODE: bool = False
+    # Hybrid pipeline: run Python collectors (live GST API, Google News RSS,
+    # web search) first, then a single Gemini synthesis call. This is the
+    # documented/intended mode (.env.example and README both set it true) and
+    # the ONLY path that surfaces collector evidence — without it, a bare name
+    # like "KINGFISHER" yields an all-zero report because the legacy path leans
+    # entirely on the LLM. Default True so every environment uses it unless an
+    # operator explicitly sets USE_HYBRID_MODE=false to fall back to the legacy
+    # two-pass + Google-Search-grounding path.
+    USE_HYBRID_MODE: bool = True
 
     def resolved_database_url(self) -> str:
         """
