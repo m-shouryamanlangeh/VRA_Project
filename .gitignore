@@ -65,3 +65,7 @@ dist/
 # Project archives / Claude
 vra-tool.zip
 .claude/
+
+# Recovery-tool artifacts (not part of the project)
+.recovery-backup-*/
+.last-recovery-backup-path

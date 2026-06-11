@@ -37,3 +37,9 @@ frontend/.vite/
 
 # Netlify
 .netlify/
+
+# Old-architecture leftovers dragged in by an external rollback (not used by
+# the current React-SPA + JSON-API app). Kept on disk but never committed.
+static/
+templates/
+app/deps.py
