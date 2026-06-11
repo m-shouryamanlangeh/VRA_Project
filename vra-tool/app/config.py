@@ -61,6 +61,13 @@ class AppSettings(BaseSettings):
     # operator explicitly sets USE_HYBRID_MODE=false to fall back to the legacy
     # two-pass + Google-Search-grounding path.
     USE_HYBRID_MODE: bool = True
+    # Fully deterministic, LLM-free mode. When False, NO Gemini / OpenRouter /
+    # any external LLM call is made during report generation: the pipeline runs
+    # collectors → deterministic risk framework (app.core.risk) → templated
+    # narrative (app.core.narrative) → PDF, and requires no API key at all.
+    # Every score, recommendation and sentence is traceable to cited evidence.
+    # When True (default) the documented hybrid LLM-assisted path is used.
+    USE_LLM: bool = True
 
     def resolved_database_url(self) -> str:
         """

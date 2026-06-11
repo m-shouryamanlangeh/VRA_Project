@@ -1,6 +1,10 @@
 """Vendor relevance for adverse-media rows."""
 
-from app.core.adverse_relevance import adverse_text_matches_vendor
+from app.core.adverse_relevance import (
+    adverse_text_matches_vendor,
+    is_navigation_chrome,
+    is_vendor_published_or_explainer,
+)
 
 
 def test_homonym_sharp_not_vendor() -> None:
@@ -80,4 +84,84 @@ def test_scandal_with_shared_token_not_same_company() -> None:
         "Saradha Constructions Company Pvt Ltd wins municipal tender in Kolkata",
         vendor_name=vendor,
         gst="",
+    )
+
+
+# ── Vendor-as-publisher / explainer guard ────────────────────────────────────
+
+def test_vendor_published_explainer_dropped() -> None:
+    """The vendor's own blog/explainer pages are not adverse media about it.
+
+    Regression: an Airtel finance-blog explainer titled "Who is a Wilful
+    Defaulter as per RBI? - Airtel" was keyword-scored HIGH on Defaults and
+    triggered an auto-veto → bogus REJECT for a clean-on-that-axis vendor.
+    """
+    # 1. Branded explainer title (any host).
+    assert is_vendor_published_or_explainer(
+        "Who is a Wilful Defaulter as per RBI? - Airtel",
+        "https://example.com/x",
+        "AIRTEL",
+    )
+    assert is_vendor_published_or_explainer(
+        "Paperless KYC Documents: Complete Guide to e-KYC Process in India - Airtel",
+        "https://example.com/x",
+        "AIRTEL",
+    )
+    assert is_vendor_published_or_explainer(
+        "How to Block Scam Calls on Mobile: Secure Your Phone - Airtel",
+        "https://www.airtel.in/blog/scam-calls",
+        "AIRTEL",
+    )
+    # 2. Hosted on the vendor's own domain (no explainer phrasing needed).
+    assert is_vendor_published_or_explainer(
+        "Airtel Thanks rewards", "https://www.airtel.in/anything", "AIRTEL"
+    )
+
+
+def test_real_adverse_media_not_dropped_by_explainer_guard() -> None:
+    """Genuine third-party reporting must survive the explainer / publisher guard."""
+    # Real news on a news outlet — no explainer phrasing, not the vendor's domain.
+    assert not is_vendor_published_or_explainer(
+        "Bharti Airtel under scanner for money laundering - The Economic Times",
+        "https://economictimes.indiatimes.com/x",
+        "AIRTEL",
+    )
+    assert not is_vendor_published_or_explainer(
+        "ED probing money laundering cases against Airtel: FinMin - The Hindu",
+        "https://www.thehindu.com/x",
+        "AIRTEL",
+    )
+    assert not is_vendor_published_or_explainer(
+        "CBI files chargesheet against Kingfisher Airlines in loan default case",
+        "https://www.thehindu.com/x",
+        "KINGFISHER",
+    )
+    # Explainer phrasing but branded to the OUTLET, not the vendor → keep.
+    assert not is_vendor_published_or_explainer(
+        "What is the Paytm money-laundering probe? - Times of India",
+        "https://timesofindia.indiatimes.com/x",
+        "PAYTM",
+    )
+    # Vendor token is a SUBSTRING of a news domain's label ("express" ⊂
+    # "indianexpress") — must NOT be treated as the vendor's own domain.
+    assert not is_vendor_published_or_explainer(
+        "Express Logistics under ED probe for fund diversion",
+        "https://indianexpress.com/article/x",
+        "EXPRESS LOGISTICS",
+    )
+
+
+def test_navigation_chrome_detection() -> None:
+    """Scraped search-index / nav chrome must be recognised as junk, real text not."""
+    assert is_navigation_chrome(
+        "[Page content] https://indiankanoon.org/search/?formInput=AIRTEL — AIRTEL "
+        "Skip to main content Indian Kanoon - Search engine for Indian Law"
+    )
+    assert is_navigation_chrome(
+        "Skip to main content Indian Kanoon Filter Results by Document Types All Laws"
+    )
+    # An actual NCLT order excerpt is NOT chrome.
+    assert not is_navigation_chrome(
+        "The Corporate Debtor committed default in payment. This petition is filed "
+        "by invoking Section 9 of the Insolvency and Bankruptcy Code, 2016."
     )

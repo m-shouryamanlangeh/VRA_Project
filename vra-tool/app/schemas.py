@@ -11,11 +11,19 @@ GST_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[Z]{1}[0-9A-Z]
 
 
 class Finding(BaseModel):
-    """Single OSINT finding with mandatory source URL."""
+    """Single OSINT finding with mandatory source URL.
+
+    ``fact_type`` and ``source_tier`` are populated by the risk framework
+    (``app.core.risk``) during calibration so the report can separate
+    VERIFIED FACTS from MEDIA REFERENCES and INFERENCES. Both are optional for
+    backward compatibility — older payloads validate unchanged.
+    """
 
     point: str
     source: str
     severity: Literal["HIGH", "MEDIUM", "LOW", "INFO"] = "INFO"
+    fact_type: Optional[Literal["VERIFIED_FACT", "MEDIA_REFERENCE", "INFERENCE", "NOT_ASSESSED"]] = None
+    source_tier: Optional[int] = None
 
 
 class AdverseFinding(BaseModel):
@@ -24,19 +32,24 @@ class AdverseFinding(BaseModel):
     entity: str
     search_hyperlink: str
     summary: str
-    severity: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    # INFO is permitted so an "no adverse media retained / nothing found" row can
+    # score 0 instead of being coerced to LOW (which previously invented a
+    # phantom risk contribution on otherwise-clean vendors).
+    severity: Literal["HIGH", "MEDIUM", "LOW", "INFO"] = "LOW"
     source: Optional[str] = None
+    fact_type: Optional[Literal["VERIFIED_FACT", "MEDIA_REFERENCE", "INFERENCE", "NOT_ASSESSED"]] = None
+    source_tier: Optional[int] = None
 
     @field_validator("severity", mode="before")
     @classmethod
     def coerce_severity(cls, v: Any) -> str:
-        """Coerce non-standard values (INFO, NONE, UNKNOWN, etc.) → LOW."""
+        """Coerce values to the allowed set; only a true 'no signal' maps to INFO."""
         if v is None:
             return "LOW"
         s = str(v).strip().upper()
-        if s in ("HIGH", "MEDIUM", "LOW"):
+        if s in ("HIGH", "MEDIUM", "LOW", "INFO"):
             return s
-        # Any other value (INFO, NONE, N/A, INFORMATIONAL, …) → LOW
+        # Any other value (NONE, N/A, INFORMATIONAL, …) → LOW
         return "LOW"
 
 
@@ -123,6 +136,9 @@ class VendorGenerateResponse(BaseModel):
 
     ok: bool = True
     report: VRAReport
+    # Compact adverse-media screening view (overall severity + negative findings),
+    # computed by app.core.screening — what the result UI renders directly.
+    screening: dict[str, Any] = Field(default_factory=dict)
     pdf_url: str
     audit_id: int
 
@@ -140,7 +156,7 @@ class SettingsSaveRequest(BaseModel):
 
     llm_provider: str = "gemini"
     llm_model: str = "gemini-2.0-flash"
-    temperature: float = Field(0.2, ge=0.0, le=2.0)
+    temperature: float = Field(0.0, ge=0.0, le=2.0)
     max_output_tokens: int = Field(16384, ge=256, le=65536)
     daily_quota_limit: int = Field(default=1500, ge=1)
     keys: list[ApiKeyPayload] = Field(default_factory=list)

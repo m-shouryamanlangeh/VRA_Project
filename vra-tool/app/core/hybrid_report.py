@@ -7,17 +7,26 @@ import logging
 import re
 from typing import Any
 
-from app.core.adverse_relevance import adverse_text_matches_vendor
+from app.core.adverse_relevance import (
+    adverse_text_matches_vendor,
+    is_benign_protector_or_advisory,
+    is_navigation_chrome,
+    is_vendor_published_or_explainer,
+)
 from app.core.collectors.orchestrator import EvidencePack
+from app.core.risk.adverse_media import score_article
+from app.core.risk.entity_resolution import resolve_entity
+from app.core.risk.litigation import classify_litigation
 from app.schemas import GST_RE, AdverseFinding, Finding, SynthesisResult, VRAReport
 
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_SOURCE = "https://www.mca.gov.in/"
+_GST_SOURCE = "https://www.gst.gov.in/"
 
 
-def _finding(point: str, severity: str = "INFO") -> Finding:
-    return Finding(point=point, source=_PLACEHOLDER_SOURCE, severity=severity)  # type: ignore[arg-type]
+def _finding(point: str, severity: str = "INFO", source: str = _PLACEHOLDER_SOURCE) -> Finding:
+    return Finding(point=point, source=source, severity=severity)  # type: ignore[arg-type]
 
 
 # ── Severity classification brain (stakeholder-owned keyword tiers) ───────────
@@ -35,7 +44,7 @@ _HIGH_MARKERS = (
     "defrauded", "cheating", "pmla", "ed raid", "ed probe", "ed summons",
     "ed attaches", "cbi case", "cbi probe", "cbi raid", "sfio probe", "sebi ban",
     "debarred", "blacklisted", "blacklist", "convicted", "conviction",
-    "insolvency", "wilful default", "wilful defaulter", "ponzi", "scam",
+    "wilful default", "wilful defaulter", "ponzi", "scam",
     "shell company", "shell firm", "black money", "enforcement directorate",
     "look-out notice", "lookout circular", "chargesheet", "charge sheet",
     "hawala", "benami", "fir registered", "fir filed", "fir lodged",
@@ -52,6 +61,7 @@ _MEDIUM_MARKERS = (
     "show cause", "show-cause", "penalty", "fine", "gst fraud", "loan default",
     "npa", "non-performing", "tax evasion", "tax demand", "raid",
     "search operation", "search and seizure", "nclt", "nclat", "ibc",
+    "insolvency", "insolvency proceedings", "insolvency petition",
     "liquidation", "winding-up", "winding up", "sarfaesi", "drt", "cibil",
     "default notice", "recovery proceedings", "auction notice", "downgrade",
     "rating cut", "rating downgrade", "negative outlook", "credit watch",
@@ -77,37 +87,10 @@ _INFO_NEGATIONS = (
     "profitable", "growth", "expansion", "launches",
 )
 
-# Vendor-as-PROTECTOR / advisory headlines: these contain risk words ("fraud",
-# "scam", "arrest") but the vendor is OFFERING protection or PUBLISHING guidance,
-# not the subject of wrongdoing — e.g. "Airtel launches AI fraud-alert", "scam
-# prevention with AI", "digital-arrest safety tips". High-precision phrases only:
-# a company committing fraud is never described as selling "fraud protection".
-# When present, the item is benign regardless of which risk keyword also matched.
-_BENIGN_CONTEXT_MARKERS = (
-    # Anti-fraud products / advisories (vendor is the protector)
-    "fraud alert", "fraud protection", "fraud prevention", "fraud detection",
-    "fraud-blocking", "fraud blocking", "fraud awareness", "fraud guide",
-    "anti-fraud", "anti fraud", "scam prevention", "scam protection",
-    "scam-blocking", "scam blocking", "scam awareness", "scam guide",
-    "anti-scam", "anti scam", "safety tips", "protect customers",
-    "protect users", "protect consumers", "protection against",
-    "guard against", "shield against", "combat fraud", "fight fraud",
-    "curb fraud", "prevent fraud", "tackle fraud", "block scams",
-    # Exoneration / positive outcomes (vendor cleared)
-    "clean chit", "clean-chit", "acquitted", "exonerated", "cleared of",
-    "gives clean", "given clean", "no wrongdoing",
-)
-
-
-def _is_benign_security_headline(text: str) -> bool:
-    """True if the vendor is the protector/adviser, not the wrongdoer.
-
-    Used to keep anti-fraud product launches and safety advisories from being
-    mis-scored as adverse media (the classic false positive for telcos / banks /
-    fintechs whose security products surface under adverse-media queries).
-    """
-    t = (text or "").lower()
-    return any(m in t for m in _BENIGN_CONTEXT_MARKERS)
+# Vendor-as-PROTECTOR detection now lives in adverse_relevance so the validator
+# (legacy path) and report builder (hybrid path) share one implementation. Thin
+# alias kept for the local severity classifier.
+_is_benign_security_headline = is_benign_protector_or_advisory
 
 
 def _compile_markers(markers: tuple[str, ...]) -> re.Pattern[str]:
@@ -176,17 +159,43 @@ def _severity_for_title(title: str, mapping: list[dict[str, Any]]) -> str:
     return kw if kw in ("HIGH", "MEDIUM", "LOW") else "LOW"
 
 
+def deterministic_synthesis() -> SynthesisResult:
+    """Return a neutral, LLM-free ``SynthesisResult`` for ``USE_LLM=false`` mode.
+
+    In fully deterministic mode no model supplies narrative, ``top_findings`` or
+    per-headline severity hints. ``build_vra_report`` therefore runs on collector
+    evidence alone: the keyword-severity brain and the adverse-media engine
+    classify every headline/snippet, and ``_ensure_calibrated_rubric`` computes
+    the authoritative scores afterwards. The seed ``risk_rating`` / ``recommendation``
+    are placeholders that the deterministic rubric overwrites from the findings.
+    """
+    return SynthesisResult(
+        executive_summary={},
+        top_findings=[],
+        top_positives=[],
+        risk_rating="LOW",
+        recommendation="CONDITIONAL",
+        news_severity=[],
+    )
+
+
 def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date_str: str) -> VRAReport:
     """Merge evidence pack and model synthesis into a full ``VRAReport``."""
     v = evidence.vendor
     gst = evidence.gst_data or {}
     mca = evidence.mca_data or {}
 
+    # Vendor identity — computed once and reused for every relevance / severity
+    # decision below (web findings, news headlines, adverse media).
+    vendor_label = str(v.get("name") or "")
+    gstin = str(v.get("gst") or "")
+    gstin_verified = bool(GST_RE.match(gstin.strip().upper()))
+
     es: dict[str, Any] = dict(synthesis.executive_summary or {})
     es.setdefault("risk_rating", synthesis.risk_rating)
     es.setdefault("risk_level", synthesis.risk_rating)
     # Without a verified GSTIN, do not let the model label the whole case HIGH (name-only OSINT is ambiguous).
-    gstin_ok = bool(GST_RE.match(str(v.get("gst") or "").strip().upper()))
+    gstin_ok = gstin_verified
     if not gstin_ok and synthesis.risk_rating == "HIGH":
         logger.info("Hybrid: capping portfolio risk_rating HIGH→MEDIUM (no verified GSTIN on request)")
         es["risk_rating"] = "MEDIUM"
@@ -197,24 +206,28 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     if gst:
         if gst.get("legal_name"):
             company_profile.append(
-                _finding(f"GST legal name: {gst['legal_name']}")
+                _finding(f"GST legal name: {gst['legal_name']}", source=_GST_SOURCE)
             )
         if gst.get("trade_name"):
-            company_profile.append(_finding(f"GST trade name: {gst['trade_name']}"))
+            company_profile.append(_finding(f"GST trade name: {gst['trade_name']}", source=_GST_SOURCE))
         if gst.get("gst_status"):
-            company_profile.append(_finding(f"GST status (API): {gst['gst_status']}"))
+            company_profile.append(_finding(f"GST status (API): {gst['gst_status']}", source=_GST_SOURCE))
         if gst.get("registration_date"):
             company_profile.append(
-                _finding(f"GST registration date (API): {gst['registration_date']}")
+                _finding(f"GST registration date (API): {gst['registration_date']}", source=_GST_SOURCE)
             )
         if gst.get("state_jurisdiction"):
             company_profile.append(
-                _finding(f"State jurisdiction (API): {gst['state_jurisdiction']}")
+                _finding(f"State jurisdiction (API): {gst['state_jurisdiction']}", source=_GST_SOURCE)
             )
         if gst.get("business_type"):
-            company_profile.append(_finding(f"Constitution / business type (API): {gst['business_type']}"))
+            company_profile.append(
+                _finding(f"Constitution / business type (API): {gst['business_type']}", source=_GST_SOURCE)
+            )
         if gst.get("address"):
-            company_profile.append(_finding(f"Principal address (API): {gst['address'][:500]}"))
+            company_profile.append(
+                _finding(f"Principal address (API): {gst['address'][:500]}", source=_GST_SOURCE)
+            )
     if not company_profile:
         if not (str(v.get("gst") or "").strip()):
             company_profile.append(
@@ -227,7 +240,7 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
         else:
             company_profile.append(
                 _finding(
-                    "Hybrid mode: GST public API returned no usable fields — verify GSTIN manually "
+                    "GST public API returned no usable fields — verify GSTIN manually "
                     f"on https://services.gst.gov.in/services/searchgstin ."
                 )
             )
@@ -242,7 +255,7 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     else:
         management.append(
             _finding(
-                "Hybrid mode: MCA director scrape / API not available (CAPTCHA). "
+                "Automated MCA director scrape / API not available (CAPTCHA). "
                 "Director due-diligence is manual for this run."
             )
         )
@@ -255,26 +268,58 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     if not mca_filings:
         mca_filings.append(
             _finding(
-                "Hybrid mode: no MCA master data retrieved — CIN / charge filings require MCA21 or vendor disclosure."
+                "No MCA master data retrieved — CIN / charge filings require MCA21 or vendor disclosure."
             )
         )
 
     ws = evidence.web_search_results or {}
 
     def _web_findings(dim_key: str, fallback: str) -> list[Finding]:
-        """Convert web search snippets for a dimension into Finding objects."""
+        """Convert web search snippets for a dimension into Finding objects.
+
+        Web snippets get the SAME scrutiny as adverse_media headlines — without
+        it, a generic NCLT order that never names the vendor, the vendor's own
+        explainer blog ("Who is a Wilful Defaulter as per RBI? - Airtel"), or a
+        scraped search-index page would each be keyword-classified HIGH and drive
+        a false auto-veto. The four gates below run before classification.
+        """
         snippets = ws.get(dim_key, [])
         if not snippets:
             return [_finding(fallback)]
-        findings = []
-        for s in snippets[:5]:
+        findings: list[Finding] = []
+        for s in snippets:
+            if len(findings) >= 5:
+                break
             title = s.get("title", "")
             snippet = s.get("snippet", "")
             url = s.get("url", "") or _PLACEHOLDER_SOURCE
             text = f"{title} — {snippet}".strip(" —")
-            if text:
-                sev = _classify_snippet_severity(text)
-                findings.append(Finding(point=text[:1000], source=url, severity=sev))  # type: ignore[arg-type]
+            if not text:
+                continue
+            # 1. Scraped navigation / search-index chrome → never a finding.
+            if is_navigation_chrome(text) or is_navigation_chrome(title):
+                continue
+            # 2. Vendor-relevance gate (same as adverse_media): a snippet that
+            #    never refers to this vendor must not score its dimensions.
+            if not adverse_text_matches_vendor("", text, vendor_name=vendor_label, gst=gstin):
+                continue
+            # 3. Vendor-as-publisher / explainer content: risk keywords, but the
+            #    vendor is the author, not the subject.
+            if is_vendor_published_or_explainer(title, url, vendor_label):
+                continue
+            sev = _classify_snippet_severity(text)
+            # Litigation Intelligence: for the litigations dimension, refine the
+            # raw keyword severity with the litigation classifier so routine
+            # commercial / consumer / appeal matters are not scored like fraud,
+            # and matters resolved in the entity's favour collapse to INFO.
+            if dim_key == "litigations":
+                sev = classify_litigation(text).risk_band
+            # 4. Name-only OSINT: never let a single web snippet reach veto-class
+            #    (HIGH→100) without a verified GSTIN — mirror the news-headline
+            #    cap so the no-GSTIN path can't auto-REJECT on an ambiguous match.
+            if sev == "HIGH" and not gstin_verified:
+                sev = "MEDIUM"
+            findings.append(Finding(point=text[:1000], source=url, severity=sev))  # type: ignore[arg-type]
         return findings or [_finding(fallback)]
 
     credit_ratings = _web_findings(
@@ -318,22 +363,33 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
 
     adverse_media: list[AdverseFinding] = []
     sev_map = synthesis.news_severity or []
-    vendor_label = str(v.get("name") or "")
-    gstin = str(v.get("gst") or "")
-    gstin_verified = bool(GST_RE.match(gstin.strip().upper()))
     # Surface the full collected battery (NewsCollector caps at MAX_HEADLINES=40),
     # not just the first 20 — the goal is to report ALL of a vendor's negative news.
     for h in evidence.news_headlines[:40]:
         title = str(h.get("title") or "")
         link = str(h.get("link") or entity_link)
-        if not adverse_text_matches_vendor("", title, vendor_name=vendor_label, gst=gstin):
-            continue
-        # Drop vendor-as-protector / advisory headlines (e.g. "Airtel launches AI
-        # fraud-alert") — they surface under adverse-media queries but are not
-        # adverse. Skip unless the LLM explicitly mapped this title to a severity.
-        if _is_benign_security_headline(title) and _llm_severity_for_title(title, sev_map) is None:
-            continue
-        sev = _severity_for_title(title, sev_map)
+        published = str(h.get("published") or h.get("date") or "")
+        llm_sev = _llm_severity_for_title(title, sev_map)
+        # Adverse Media Engine: relevance gate + 5-dimension scoring (severity,
+        # recency, credibility, relevance, outcome). It drops off-entity,
+        # vendor-as-protector, vendor-published, and no-signal headlines, and
+        # returns a credibility/recency/outcome-modulated band. An explicit LLM
+        # severity mapping still wins (the model saw full context).
+        sc = score_article(
+            title=title,
+            url=link,
+            published=published,
+            vendor_name=vendor_label,
+            gst=gstin,
+            base_band=_classify_snippet_severity(title),
+            dimension="adverse_media",
+        )
+        if llm_sev:
+            sev = llm_sev
+        else:
+            if not sc.is_adverse:
+                continue
+            sev = sc.band
         # RSS + name-only OSINT: never flag a headline as HIGH without a verified GSTIN match path.
         if sev == "HIGH" and not gstin_verified:
             sev = "MEDIUM"
@@ -352,7 +408,7 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
                 entity=v.get("name", ""),
                 search_hyperlink=entity_link,
                 summary="No adverse headlines returned from Google News RSS for the constructed query.",
-                severity="LOW",
+                severity="INFO",
                 source=None,
             )
         )
@@ -476,6 +532,33 @@ def build_vra_report(evidence: EvidencePack, synthesis: SynthesisResult, *, date
     connected: list[dict[str, Any]] = []
     if isinstance(mca.get("connected"), list):
         connected = [x for x in mca["connected"] if isinstance(x, dict)]
+
+    # ── Entity Resolution (run on the collected evidence) ────────────────────
+    # Mine candidate legal entities from the identity evidence so the report
+    # records WHICH legal person was assessed, with what confidence, and why.
+    evidence_texts: list[str] = []
+    for h in evidence.news_headlines[:40]:
+        if h.get("title"):
+            evidence_texts.append(str(h["title"]))
+    for snips in (evidence.web_search_results or {}).values():
+        for s in snips[:5]:
+            evidence_texts.append(f"{s.get('title', '')} {s.get('snippet', '')}".strip())
+    mca_name = ""
+    for key in ("company_name", "name", "legal_name"):
+        if isinstance(mca.get(key), str) and mca.get(key):
+            mca_name = str(mca[key])
+            break
+    resolution = resolve_entity(
+        input_name=vendor_label,
+        gst=gstin,
+        org_type=str(v.get("org_type") or ""),
+        gst_legal_name=str(gst.get("legal_name") or "") if gst else "",
+        gst_trade_name=str(gst.get("trade_name") or "") if gst else "",
+        mca_name=mca_name,
+        cin=str(mca.get("cin") or "") if mca else "",
+        evidence_texts=evidence_texts,
+    )
+    es["entity_resolution"] = resolution.as_dict()
 
     return VRAReport(
         vendor=dict(v),

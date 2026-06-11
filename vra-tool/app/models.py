@@ -6,6 +6,7 @@ import datetime as dt
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.timeutil import utcnow
 from app.database import Base
 
 
@@ -24,8 +25,8 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=False),
-        default=dt.datetime.utcnow,
-        onupdate=dt.datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False,
     )
 
@@ -41,7 +42,7 @@ class ApiKey(Base):
     encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=False),
-        default=dt.datetime.utcnow,
+        default=utcnow,
         nullable=False,
     )
     last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
@@ -76,7 +77,7 @@ class AuditLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=False),
-        default=dt.datetime.utcnow,
+        default=utcnow,
         nullable=False,
         index=True,
     )

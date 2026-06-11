@@ -97,6 +97,15 @@ app.include_router(audit.router)
 
 
 @app.get("/health", tags=["health"])
-def health() -> dict[str, str]:
-    """Liveness/readiness probe."""
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    """Liveness/readiness probe + runtime mode flags for the UI.
+
+    ``use_llm`` lets the frontend know whether an LLM API key is required: in
+    deterministic mode (``USE_LLM=false``) no Gemini key is needed, so the UI
+    must not warn about a missing key.
+    """
+    return {
+        "status": "ok",
+        "use_llm": settings.USE_LLM,
+        "use_hybrid_mode": settings.USE_HYBRID_MODE,
+    }

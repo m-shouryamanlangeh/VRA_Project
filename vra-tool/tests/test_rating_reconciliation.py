@@ -64,23 +64,45 @@ def test_clean_vendor_is_not_spuriously_promoted() -> None:
 
 
 def test_structurally_supported_high_stays_reject() -> None:
+    """A severe finding on a Tier-1 official record (here the RBI/CIBIL
+    wilful-defaulter registry) is a VERIFIED FACT and must reach HIGH/REJECT."""
     data = _build(
         {"risk_rating": "HIGH", "confidence": "HIGH",
          "top_findings": ["defaults: borrower declared a wilful defaulter by the bank"]},
         {"defaults": [{"point": "borrower declared a wilful defaulter by the bank",
-                       "severity": "HIGH"}]},
+                       "severity": "HIGH",
+                       "source": "https://www.watchoutinvestors.com/wilful_defaulters.asp"}]},
     )
     assert data["executive_summary"]["risk_rating"] == "HIGH"
     assert data["recommendation"] == "REJECT"
+    assert data["executive_summary"]["recommendation_tier"] == "REJECT"
 
 
 def test_llm_rating_never_lowers_a_computed_high() -> None:
-    """A veto finding present, but the LLM's structured field says LOW. The LLM
-    must not be allowed to pull a genuine HIGH down."""
+    """A VERIFIED veto finding present, but the LLM's structured field says LOW.
+    The LLM must not be allowed to pull a verified HIGH down."""
     data = _build(
         {"risk_rating": "LOW", "confidence": "HIGH",
          "top_findings": ["defaults: borrower declared a wilful defaulter"]},
         {"defaults": [{"point": "borrower declared a wilful defaulter",
-                       "severity": "HIGH"}]},
+                       "severity": "HIGH",
+                       "source": "https://www.rbi.org.in/scripts/x.aspx"}]},
     )
     assert data["executive_summary"]["risk_rating"] == "HIGH"
+
+
+def test_unverified_severe_claim_is_edd_not_reject() -> None:
+    """The core false-positive fix: a HIGH 'wilful defaulter' claim with NO
+    official source must NOT auto-REJECT. It elevates to at least MEDIUM and
+    routes to ENHANCED DUE DILIGENCE for verification."""
+    data = _build(
+        {"risk_rating": "LOW", "confidence": "HIGH",
+         "top_findings": ["defaults: borrower allegedly a wilful defaulter"]},
+        {"defaults": [{"point": "borrower allegedly a wilful defaulter (unsourced)",
+                       "severity": "HIGH"}]},
+    )
+    es = data["executive_summary"]
+    assert es["risk_rating"] in ("MEDIUM", "HIGH")
+    assert es["veto_triggered"] is False
+    assert data["recommendation"] != "REJECT"
+    assert es["recommendation_tier"] == "ENHANCED_DUE_DILIGENCE"

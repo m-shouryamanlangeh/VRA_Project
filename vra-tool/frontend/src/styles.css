@@ -1,6 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Tailwind v4 CSS-first theme (replaces the old tailwind.config.js). */
+@theme {
+  --color-paytm-blue: #00baf2;
+  --color-paytm-dark: #002970;
+  --color-paytm-bg: #f5f7fa;
+  --font-sans: "Geist", "Inter", system-ui, sans-serif;
+}
 
 /* Paytm VRA — layout helpers on top of Tailwind. */
 

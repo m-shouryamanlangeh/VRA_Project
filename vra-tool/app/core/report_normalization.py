@@ -5,6 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.core.risk.confidence import SourceFact, compute_confidence
+from app.core.risk.fact_classification import FactType, classify_fact
+from app.core.risk.recommendation import RECOMMENDATION_LABEL, recommend
+from app.core.risk.source_credibility import SourceTier, classify_source
+
 logger = logging.getLogger(__name__)
 
 _VRA_LIST_KEYS = (
@@ -90,13 +95,47 @@ def _score_for_finding_text(text: str) -> int:
     return 100 if any(m in t for m in veto_markers) else 0
 
 
-def _derive_dimension_score(findings: list[Any]) -> int:
+def _is_severe_nature(text: str) -> bool:
+    """True when the matter is of an inherently severe *nature*.
+
+    Broader than the veto-marker set: it catches fraud / criminal / insolvency /
+    sanctions / regulatory-ban matters even when phrased as an *allegation* or an
+    ongoing *probe* (no conviction word). Such matters never auto-REJECT — but
+    they are material concerns that must be investigated (ENHANCED DUE DILIGENCE)
+    rather than waved through as ordinary adverse media.
+    """
+    from app.core.risk.litigation import classify_litigation
+
+    return classify_litigation(text or "").risk_band == "HIGH"
+
+
+def _finding_is_verified_severe(f: dict[str, Any], *, dimension: str | None = None) -> bool:
+    """True when a HIGH finding cites a veto-class event AND is on an official record.
+
+    This is the gate that prevents hallucinated / media-only claims from
+    triggering an auto-veto. A veto-class score (100) is only reachable when the
+    finding's source is a Tier-1 official record (regulator, court, registry,
+    sanctions list). Media or inference-grade citations top out at 75 (HIGH but
+    not auto-veto), routing the case to ENHANCED DUE DILIGENCE instead of REJECT.
+    """
+    text = str(f.get("point") or f.get("summary") or "")
+    if _score_for_finding_text(text) < 100:
+        return False
+    src = str(f.get("source") or f.get("search_hyperlink") or "")
+    return classify_fact(text, src, dimension=dimension) == FactType.VERIFIED_FACT
+
+
+def _derive_dimension_score(findings: list[Any], *, dimension: str | None = None) -> int:
     """Highest severity-band across findings in a section, with veto bumps.
 
     Veto-text bump only fires when the LLM already scored the finding HIGH
     (base ≥ 75).  Applying it to LOW/INFO findings causes false positives
     because sentences like "Not found on sanctions lists" or "No wilful
     default records found" contain veto keywords in a NEGATIVE context.
+
+    The 75→100 (auto-veto) bump additionally requires the finding to be a
+    VERIFIED FACT (Tier-1 official source). An unverified severe claim stays at
+    75: HIGH on the dimension, but never an automatic veto/REJECT.
     """
     if not findings:
         return 0
@@ -109,9 +148,8 @@ def _derive_dimension_score(findings: list[Any]) -> int:
         # Only apply text-based veto bump when the LLM already flagged HIGH.
         # LOW/INFO findings that mention "sanction" / "default" etc. are almost
         # always negative-context ("Not found on…") and must NOT be bumped.
-        if base >= 75:
-            text = f.get("point") or f.get("summary") or ""
-            bumped = max(base, _score_for_finding_text(str(text)))
+        if base >= 75 and _finding_is_verified_severe(f, dimension=dimension):
+            bumped = 100
         else:
             bumped = base
         best = max(best, bumped)
@@ -167,6 +205,25 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
         es = {}
         data["executive_summary"] = es
 
+    # 0. Litigation Intelligence (all paths). Re-grade each litigation finding by
+    # the *nature* of the matter rather than mere keyword presence, so routine
+    # commercial / consumer / appeal disputes and matters resolved in the
+    # entity's favour are not scored like fraud or insolvency. Fraud / criminal /
+    # insolvency-against / conviction language is (correctly) escalated to HIGH.
+    for f in data.get("litigations") or []:
+        if not isinstance(f, dict):
+            continue
+        sev = str(f.get("severity") or "INFO").upper()
+        if sev not in ("LOW", "MEDIUM", "HIGH"):
+            continue
+        from app.core.risk.litigation import classify_litigation
+
+        assessment = classify_litigation(str(f.get("point") or ""))
+        if assessment.risk_band != sev:
+            f["severity"] = assessment.risk_band
+            f["litigation_nature"] = assessment.nature.value
+            f["litigation_outcome"] = assessment.outcome.value
+
     # Capture the LLM's own risk_rating *before* we recompute it. In hybrid mode
     # this is `synthesis.risk_rating` (already capped HIGH→MEDIUM by
     # build_vra_report when no GSTIN is verified); in the legacy/search path it
@@ -199,7 +256,7 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
     # then be ≥ 75 automatically.  There is no legitimate case where
     # Gemini's summary score should exceed what the per-section findings show.
     for section, dim_key in _SECTION_TO_DIMENSION.items():
-        derived = _derive_dimension_score(data.get(section) or [])
+        derived = _derive_dimension_score(data.get(section) or [], dimension=dim_key)
         dim[dim_key] = derived
 
     # Event-driven minimum-severity floor. The LLM is non-deterministic on
@@ -480,6 +537,268 @@ def _ensure_calibrated_rubric(data: dict[str, Any]) -> None:
         )
 
     data["recommendation"] = rec
+
+    # 7. Auditable score rationale — show WHY the score is what it is: the
+    # weighted contribution of each non-zero dimension, the veto trigger (if
+    # any), and the rating→recommendation step. An auditor should be able to
+    # reconstruct the number from this line.
+    contribs = [
+        (d, dim.get(d, 0), w, round(dim.get(d, 0) * w / 100.0, 1))
+        for d, w in _DIMENSION_WEIGHTS.items()
+        if dim.get(d, 0) > 0
+    ]
+    contribs.sort(key=lambda x: x[3], reverse=True)
+    if contribs:
+        breakdown = "; ".join(f"{d} {sc} (×{w}% = {pts})" for d, sc, w, pts in contribs)
+    else:
+        breakdown = "all 12 dimensions scored 0 (no adverse signal found)"
+    veto_note = (
+        f"VETO: {es.get('veto_reason')}"
+        if es.get("veto_triggered")
+        else "No veto rule triggered"
+    )
+    # The final disposition is set by the evidence-gated six-tier engine in
+    # _apply_production_framework; it appends the recommendation clause so the
+    # rationale and the headline recommendation always use one vocabulary.
+    es["risk_score_rationale"] = (
+        f"Risk score {score}/100 = weighted sum of dimension scores "
+        f"[{breakdown}]. {veto_note}. Rating {rr} (confidence {conf})."
+    )
+    es["score_contributions"] = [
+        {"dimension": d, "score": sc, "weight_pct": w, "points": pts}
+        for d, sc, w, pts in contribs
+    ]
+
+    # 8. Production risk framework — annotate provenance, compute an independent
+    # confidence band, derive the six-tier recommendation gated on verified
+    # facts, and assemble the mandatory explainability block.
+    _apply_production_framework(data, dim, score, rr)
+
+
+# Veto-class markers used to decide whether a HIGH finding is "severe" for the
+# purpose of REJECT-gating. Reuses the same vocabulary as `_score_for_finding_text`.
+_FINDING_SECTIONS_FOR_FRAMEWORK = (
+    "company_profile", "management", "credit_ratings", "financial_soundness",
+    "borrowings", "funds_raised", "mca_filings", "defaults", "litigations",
+    "statutory_compliance",
+)
+_ADVERSE_SECTIONS_FOR_FRAMEWORK = ("adverse_media", "fraud_aml")
+
+# High-weight dimensions whose *absence* of signal is a genuine positive worth
+# surfacing as a mitigant (generalized — no entity names).
+# Wording is deliberately scoped to "in the OSINT gathered" — the automated
+# collectors do not directly screen official sanctions/PEP lists or credit
+# bureaus, so the report must not imply those registers were queried.
+_POSITIVE_WHEN_ZERO: dict[str, str] = {
+    "sanctions_aml_fraud": "No sanctions / AML / fraud signals surfaced in the OSINT gathered "
+                           "(official sanctions/PEP lists not directly screened)",
+    "defaults": "No wilful-defaulter or default records surfaced in the OSINT gathered",
+    "litigations": "No adverse litigation surfaced in the OSINT gathered",
+    "statutory_compliance": "No statutory / regulatory enforcement surfaced in the OSINT gathered",
+    "credit_ratings": "No credit-rating downgrade or distress signal surfaced in the OSINT gathered",
+}
+
+
+def _gstin_verified(data: dict[str, Any]) -> bool:
+    from app.schemas import GST_RE
+    gst = str((data.get("vendor") or {}).get("gst") or "").strip().upper()
+    return bool(GST_RE.match(gst))
+
+
+def _apply_production_framework(
+    data: dict[str, Any], dim: dict[str, int], score: int, rating: str
+) -> None:
+    """Annotate provenance, compute confidence + six-tier recommendation, and
+    build the WHY-THIS-RATING explainability block.
+
+    This runs after the deterministic dimension scoring. It is entity-agnostic:
+    every decision keys off the provenance/severity of the evidence, never the
+    vendor's identity.
+    """
+    es = data.get("executive_summary")
+    if not isinstance(es, dict):
+        return
+
+    facts: list[SourceFact] = []
+    seen_hosts: set[str] = set()
+    verified_severe = False
+    serious_unverified = False
+    minor_findings = False
+    credible_count = 0
+    missing_sections: list[str] = []
+
+    def _process_section(section: str, items: list[Any], *, is_adverse: bool) -> None:
+        nonlocal verified_severe, serious_unverified, minor_findings, credible_count
+        dim_key = _SECTION_TO_DIMENSION.get(section, section)
+        section_has_signal = False
+        for f in items:
+            if not isinstance(f, dict):
+                continue
+            text = str(f.get("summary") if is_adverse else f.get("point") or "")
+            if is_adverse and not text:
+                text = str(f.get("point") or "")
+            src = str(f.get("source") or f.get("search_hyperlink") or "")
+            sev = str(f.get("severity") or "INFO").upper()
+
+            cred = classify_source(src, dimension=dim_key)
+            ft = classify_fact(text, src, dimension=dim_key)
+            # Annotate the finding in place so the schema / PDF can show provenance.
+            f["fact_type"] = ft.value
+            f["source_tier"] = int(cred.tier)
+
+            if sev in ("LOW", "MEDIUM", "HIGH"):
+                section_has_signal = True
+                if sev in ("LOW", "MEDIUM"):
+                    minor_findings = True
+                if sev == "HIGH":
+                    has_veto_marker = _score_for_finding_text(text) >= 100
+                    # Only a *confirmed* severe event (sanctions listing,
+                    # conviction, CIRP admission, strike-off, wilful-default
+                    # tag) sitting on an official Tier-1 record may justify
+                    # REJECT.
+                    if has_veto_marker and ft == FactType.VERIFIED_FACT:
+                        verified_severe = True
+                    # Everything else that is severe — an unverified confirmed
+                    # event, OR a severe-nature matter (fraud / criminal /
+                    # insolvency / sanctions / ban, including mere allegations
+                    # or ongoing probes) — is a material concern that routes to
+                    # ENHANCED DUE DILIGENCE for investigation, never REJECT.
+                    elif has_veto_marker or _is_severe_nature(text):
+                        serious_unverified = True
+
+            # Count distinct credible sources for confidence (Tier 1–3, not
+            # search-pointers / inference-only).
+            if ft in (FactType.VERIFIED_FACT, FactType.MEDIA_REFERENCE) and cred.host:
+                if cred.host not in seen_hosts:
+                    seen_hosts.add(cred.host)
+                    credible_count += 1
+                    facts.append(SourceFact(tier=cred.tier, fact_type=ft))
+
+        # A finding section that produced no adverse signal AND no verified
+        # registry fact is "missing information" worth surfacing.
+        if not is_adverse and not section_has_signal:
+            verified_here = any(
+                isinstance(f, dict) and f.get("fact_type") == FactType.VERIFIED_FACT.value
+                for f in items
+            )
+            if not verified_here:
+                missing_sections.append(section.replace("_", " "))
+
+    for section in _FINDING_SECTIONS_FOR_FRAMEWORK:
+        _process_section(section, data.get(section) or [], is_adverse=False)
+    for section in _ADVERSE_SECTIONS_FOR_FRAMEWORK:
+        _process_section(section, data.get(section) or [], is_adverse=True)
+
+    gstin_ok = _gstin_verified(data)
+
+    # ── Entity resolution context (provided by the pipeline, or a fallback) ──
+    er = es.get("entity_resolution") if isinstance(es.get("entity_resolution"), dict) else {}
+    if not er:
+        # Legacy / search path: the pipeline did not resolve the entity. Mine
+        # candidate legal names from the report's own finding text so the report
+        # still records which entity was assessed and at what confidence.
+        from app.core.risk.entity_resolution import resolve_entity
+
+        vendor = data.get("vendor") or {}
+        texts: list[str] = []
+        for section in _FINDING_SECTIONS_FOR_FRAMEWORK:
+            for f in data.get(section) or []:
+                if isinstance(f, dict) and f.get("point"):
+                    texts.append(str(f["point"]))
+        for section in _ADVERSE_SECTIONS_FOR_FRAMEWORK:
+            for f in data.get(section) or []:
+                if isinstance(f, dict) and f.get("summary"):
+                    texts.append(str(f["summary"]))
+        resolution = resolve_entity(
+            input_name=str(vendor.get("name") or ""),
+            gst=str(vendor.get("gst") or ""),
+            org_type=str(vendor.get("org_type") or ""),
+            evidence_texts=texts[:60],
+        )
+        er = resolution.as_dict()
+        es["entity_resolution"] = er
+    entity_conf = str(er.get("confidence") or ("HIGH" if gstin_ok else "LOW")).upper()
+    entity_ambiguous = bool(er.get("ambiguous", False))
+
+    # ── Confidence (independent of risk) ─────────────────────────────────────
+    conf_result = compute_confidence(facts, entity_confidence=entity_conf)
+    es["confidence"] = conf_result.band
+    es["confidence_score"] = conf_result.score
+    es["confidence_drivers"] = conf_result.drivers
+    es["confidence_components"] = conf_result.components
+
+    # ── Risk-band elevation for genuine but unverified severe signals ────────
+    if rating == "LOW" and serious_unverified:
+        rating = "MEDIUM"
+        es["risk_rating"] = "MEDIUM"
+        es.setdefault(
+            "_rating_promoted_reason",
+            "A severe but unverified signal was found; elevated to MEDIUM pending "
+            "official-record confirmation.",
+        )
+
+    # ── Evidence sufficiency ─────────────────────────────────────────────────
+    evidence_sufficient = bool(credible_count >= 1 or gstin_ok or er.get("identifiers_verified"))
+
+    # ── Six-tier recommendation, gated on verified facts ─────────────────────
+    rec_result = recommend(
+        risk_band=rating,
+        confidence_band=conf_result.band,
+        verified_severe=verified_severe,
+        serious_unverified=serious_unverified,
+        minor_findings=minor_findings,
+        evidence_sufficient=evidence_sufficient,
+        entity_ambiguous=entity_ambiguous,
+    )
+    data["recommendation"] = rec_result.legacy
+    es["recommendation_tier"] = rec_result.recommendation
+    es["recommendation_label"] = RECOMMENDATION_LABEL.get(rec_result.recommendation, "")
+    es["recommendation_rationale"] = rec_result.rationale
+    es["recommendation_next_actions"] = rec_result.next_actions
+
+    # Reconcile the auditable score rationale with the final six-tier disposition
+    # so the report never mixes legacy (PROCEED/…) and six-tier vocabularies.
+    if es.get("risk_score_rationale"):
+        label = (es["recommendation_label"] or rec_result.recommendation.replace("_", " ").title()).rstrip(". ")
+        es["risk_score_rationale"] = f"{str(es['risk_score_rationale']).rstrip()} Recommendation: {label}."
+
+    # ── Mandatory explainability block ───────────────────────────────────────
+    contribs = es.get("score_contributions") or []
+    top_negative = [
+        f"{c['dimension'].replace('_', ' ')} scored {c['score']} "
+        f"(weight {c['weight_pct']}%, +{c['points']} pts)"
+        for c in contribs[:3]
+    ]
+    positives = list(es.get("key_mitigants") or [])
+    for dim_key, label in _POSITIVE_WHEN_ZERO.items():
+        if dim.get(dim_key, 0) == 0 and label not in positives:
+            positives.append(label)
+    if gstin_ok:
+        positives.insert(0, "Legal identity anchored by a verified GSTIN")
+
+    missing: list[str] = []
+    if not gstin_ok:
+        missing.append("No verified GSTIN — statutory identity unconfirmed")
+    if entity_ambiguous:
+        missing.append("Legal entity is ambiguous (multiple name matches)")
+    if credible_count == 0:
+        missing.append("No Tier-1/2 corroborating source retrieved")
+    if missing_sections:
+        missing.append(
+            "No verified record for: " + ", ".join(sorted(set(missing_sections))[:6])
+        )
+
+    es["why_rating"] = {
+        "rating": es.get("risk_rating"),
+        "risk_score": score,
+        "confidence": conf_result.band,
+        "recommendation": rec_result.recommendation,
+        "top_negative_factors": top_negative or ["No adverse dimension scored above zero."],
+        "top_positive_factors": positives[:5] or ["No positive signal could be evidenced."],
+        "missing_information": missing or ["None material — assessment is well evidenced."],
+        "confidence_drivers": conf_result.drivers,
+        "recommended_next_actions": rec_result.next_actions,
+    }
 
 
 def normalize_legacy_vra_payload(

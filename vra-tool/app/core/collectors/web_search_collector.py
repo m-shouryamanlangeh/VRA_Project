@@ -20,8 +20,11 @@ from app.core.collectors.base import BaseCollector, CollectorResult
 
 logger = logging.getLogger(__name__)
 
-# Max results per individual search query
-_MAX_PER_QUERY = 3
+# Max results per individual search query. Higher recall makes high-signal
+# items (e.g. NCLT/CIRP insolvency cases) appear more consistently across runs
+# when using the non-deterministic DuckDuckGo fallback; relevance/quality gates
+# downstream drop the extra low-signal hits.
+_MAX_PER_QUERY = 5
 # Seconds to wait between DDG requests to avoid rate-limiting
 _DDG_DELAY = 0.3
 # Hard per-query wall-clock cap enforced via asyncio.wait_for().
@@ -294,10 +297,13 @@ def _build_queries(vendor_name: str, gst: str) -> list[tuple[str, str]]:
          f'{vn} site:tracxn.com OR site:thecompanycheck.com company profile India'),
 
         # ── LITIGATIONS ──────────────────────────────────────────────────────
+        # Both forms quote the vendor name: an UNQUOTED "{vn} NCLT insolvency …"
+        # query returns generic NCLT/IBC orders that never name the vendor, which
+        # then get keyword-scored HIGH on litigations (false positive).
         ("litigations",
-         f'{vn} NCLT IBC insolvency petition India court'),
+         f'{vn_q} NCLT OR CIRP OR IBC OR insolvency OR "corporate insolvency" petition India'),
         ("litigations",
-         f'{vn_q} NCLT OR "High Court" OR litigation OR insolvency OR court India'),
+         f'{vn_q} NCLT OR "High Court" OR eCourts OR litigation OR "winding up" OR court case India'),
 
         # ── DEFAULTS / WILFUL DEFAULT ────────────────────────────────────────
         ("defaults",
@@ -431,9 +437,12 @@ class WebSearchCollector(BaseCollector):
         enriched_urls.add(ik_url)
 
         for url in list(enriched_urls)[:6]:  # cap fetches to stay in time budget
-            # For IndianKanoon search pages, don't require vendor name in content
-            require_name = "indiankanoon.org/search" not in url
-            page_text = await _fetch_page_snippet(url, vendor_name, require_vendor_name=require_name)
+            # Always require the vendor name to appear in the captured window —
+            # including IndianKanoon *search* pages. Previously these were fetched
+            # with require_vendor_name=False, so a vendor with no real cases still
+            # got the bare search-results index (nav chrome + filter sidebar)
+            # dumped in as a "litigation" finding.
+            page_text = await _fetch_page_snippet(url, vendor_name, require_vendor_name=True)
             if page_text:
                 dim_key = "litigations" if "indiankanoon" in url or "nclt" in url else "company_profile"
                 results_by_dim.setdefault(dim_key, []).append({

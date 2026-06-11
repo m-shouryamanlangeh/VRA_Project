@@ -8,8 +8,13 @@ import urllib.parse
 
 import httpx
 
-from app.core.adverse_relevance import adverse_text_matches_vendor
-from app.schemas import AdverseFinding, Finding, VRAReport
+from app.core.adverse_relevance import (
+    adverse_text_matches_vendor,
+    is_benign_protector_or_advisory,
+    is_navigation_chrome,
+    is_vendor_published_or_explainer,
+)
+from app.schemas import GST_RE, AdverseFinding, Finding, VRAReport
 
 logger = logging.getLogger(__name__)
 
@@ -208,13 +213,109 @@ async def check_url_reachable(url: str, timeout: float = 5.0) -> bool:
         return False
 
 
+# Short, neutral label per section for the placeholder shown when every finding
+# in a section is filtered out as off-vendor / non-adverse / chrome.
+_SECTION_LABEL: dict[str, str] = {
+    "company_profile":      "company-profile",
+    "management":           "management",
+    "credit_ratings":       "credit-rating",
+    "financial_soundness":  "financial-soundness",
+    "borrowings":           "borrowings / NPA",
+    "funds_raised":         "fundraising",
+    "mca_filings":          "MCA-filing",
+    "defaults":             "default / wilful-default",
+    "litigations":          "litigation",
+    "statutory_compliance": "statutory-compliance",
+}
+
+# Severity bands that represent an adverse signal (subject to relevance / benign
+# scrutiny). INFO findings are registry data or "no record found" notes and are
+# never dropped on relevance grounds.
+_ADVERSE_BANDS = frozenset({"LOW", "MEDIUM", "HIGH"})
+
+
+def _quality_drop_reason(
+    f: Finding, *, vendor_name: str, gst: str
+) -> str | None:
+    """Why this finding should NOT score a risk dimension, else None.
+
+    Path-independent guard: runs on findings from BOTH the hybrid collector path
+    and the legacy LLM-grounded path, so the same false positives can never drive
+    a score / veto regardless of how the report was assembled. Catches:
+      • scraped navigation / search-index chrome,
+      • the vendor's own explainer / help / blog pages ("Who is a Wilful
+        Defaulter as per RBI? - Airtel"),
+      • vendor-as-protector / cleared headlines ("…to curb OTP-led fraud"),
+      • adverse findings that are not about THIS vendor (generic NCLT orders,
+        "NCLT - Wikipedia", industry legal commentary).
+    INFO findings (registry data / "no record found") are always kept.
+    """
+    text = f.point or ""
+    sev = (f.severity or "INFO").upper()
+    if is_navigation_chrome(text):
+        return "navigation/search-index chrome"
+    if is_vendor_published_or_explainer(text, f.source or "", vendor_name):
+        return "vendor-published / explainer content"
+    if sev not in _ADVERSE_BANDS:
+        return None
+    if is_benign_protector_or_advisory(text):
+        return "vendor-as-protector / non-adverse"
+    if vendor_name and not adverse_text_matches_vendor(
+        "", text, vendor_name=vendor_name, gst=gst
+    ):
+        return "not about this vendor"
+    return None
+
+
+def _quality_filter(
+    items: list[Finding], section: str, *, vendor_name: str, gst: str
+) -> list[Finding]:
+    """Drop findings that must not score a dimension; cap HIGH→MEDIUM when the
+    vendor identity is unverified (no valid GSTIN) so name-only OSINT cannot
+    auto-REJECT. Guarantees the section keeps at least one neutral INFO row."""
+    gstin_verified = bool(GST_RE.match((gst or "").strip().upper()))
+    kept: list[Finding] = []
+    for f in items:
+        reason = _quality_drop_reason(f, vendor_name=vendor_name, gst=gst)
+        if reason is not None:
+            logger.info("[%s] Dropped finding (%s): %s", section, reason, (f.point or "")[:140])
+            continue
+        if (f.severity or "").upper() == "HIGH" and not gstin_verified:
+            # Mirror the hybrid / news cap: a HIGH that rests on a name-only match
+            # (no verified GSTIN) is downgraded so it can't reach veto-class.
+            f = f.model_copy(update={"severity": "MEDIUM"})
+        kept.append(f)
+    if not kept and items:
+        label = _SECTION_LABEL.get(section, section.replace("_", " "))
+        kept.append(
+            Finding(
+                point=(
+                    f"No vendor-specific {label} signal retained after relevance "
+                    "filtering — results returned were not about this vendor or were "
+                    "non-adverse. Manual verification recommended."
+                ),
+                source=_fallback_osint_search_url(vendor_name, section),
+                severity="INFO",  # type: ignore[arg-type]
+            )
+        )
+    return kept
+
+
 def _clean_finding_list(
     items: list[Finding],
     section: str,
     *,
     vendor_name: str = "",
+    gst: str = "",
 ) -> list[Finding]:
-    """Rescue findings with bad source URLs using a canonical fallback; never drop."""
+    """Quality-filter findings, then rescue bad source URLs with a fallback.
+
+    The quality filter (shared with the async variant) drops chrome / explainer /
+    vendor-as-protector / off-vendor findings and caps unverified HIGH→MEDIUM, so
+    no false positive can score a dimension regardless of which path built the
+    report.
+    """
+    items = _quality_filter(items, section, vendor_name=vendor_name, gst=gst)
     kept: list[Finding] = []
     for f in items:
         src = (f.source or "").strip()
@@ -235,7 +336,9 @@ async def _clean_finding_list_async(
     do_head: bool,
     *,
     vendor_name: str = "",
+    gst: str = "",
 ) -> list[Finding]:
+    items = _quality_filter(items, section, vendor_name=vendor_name, gst=gst)
     kept: list[Finding] = []
     for f in items:
         src = (f.source or "").strip()
@@ -289,26 +392,57 @@ def _clean_adverse_vendor_scoped(
     vendor_name: str,
     gst: str,
 ) -> list[AdverseFinding]:
-    """URL checks plus drop homonym / off-topic news rows."""
+    """URL checks plus drop homonym / off-topic / non-adverse rows.
+
+    Beyond vendor-relevance, drops vendor-as-protector headlines ("…to curb
+    OTP-led fraud") and vendor-published explainers ("…Complete Guide… - Airtel")
+    that carry risk keywords but are not adverse — issue: ordinary product /
+    growth / advisory news was inflating the adverse-media score.
+    """
+    # Local import avoids a module-load cycle (hybrid_report does not import this
+    # module). Reuses the one keyword-tier classifier so "adverse" means the same
+    # thing everywhere.
+    from app.core.hybrid_report import _classify_snippet_severity
+
     kept = _clean_adverse(items, section)
     vn = (vendor_name or "").strip()
     if not vn:
         return kept
+    gstin_verified = bool(GST_RE.match((gst or "").strip().upper()))
     out: list[AdverseFinding] = []
     for f in kept:
-        if adverse_text_matches_vendor(
-            f.entity or "",
-            f.summary or "",
-            vendor_name=vn,
-            gst=gst or "",
+        summary = f.summary or ""
+        if not adverse_text_matches_vendor(f.entity or "", summary, vendor_name=vn, gst=gst or ""):
+            logger.info("[%s] Dropped adverse (not vendor-relevant): %s", section, summary[:120])
+            continue
+        if is_benign_protector_or_advisory(summary) or is_vendor_published_or_explainer(
+            summary, str(f.source or ""), vn
         ):
-            out.append(f)
-        else:
-            logger.warning(
-                "[%s] Dropped adverse (not vendor-relevant): %s",
-                section,
-                (f.summary or f.entity or "")[:120],
-            )
+            logger.info("[%s] Dropped adverse (vendor-protector / non-adverse): %s", section, summary[:120])
+            continue
+        # Routine / positive business news (results, fundraising, growth, product
+        # launches) carries no risk keyword → not adverse media. Don't list it.
+        if _classify_snippet_severity(summary) == "INFO":
+            logger.info("[%s] Dropped adverse (no risk signal — routine news): %s", section, summary[:120])
+            continue
+        if (f.severity or "").upper() == "HIGH" and not gstin_verified:
+            f = f.model_copy(update={"severity": "MEDIUM"})
+        out.append(f)
+    # Keep the adverse-media section non-empty so the PDF table renders a clear
+    # "nothing adverse retained" row rather than a blank section.
+    if not out and items and section == "adverse_media":
+        first = items[0]
+        out.append(
+            first.model_copy(update={
+                "summary": (
+                    "No adverse media retained after relevance/quality filtering — "
+                    "results were routine business news, vendor-published content, "
+                    "or not about this vendor."
+                ),
+                "severity": "INFO",
+                "source": None,
+            })
+        )
     return out
 
 
@@ -329,15 +463,15 @@ async def validate_report_async(report: VRAReport, verify_urls: bool = True) -> 
         "litigations",
         "statutory_compliance",
     ]
+    gs = str((report.vendor or {}).get("gst") or "")
     data = report.model_dump()
     for name in sections:
         findings = [Finding.model_validate(x) for x in data.get(name, [])]
         cleaned = await _clean_finding_list_async(
-            findings, name, do_head=verify_urls, vendor_name=vn
+            findings, name, do_head=verify_urls, vendor_name=vn, gst=gs
         )
         data[name] = [x.model_dump() for x in cleaned]
 
-    gs = str((report.vendor or {}).get("gst") or "")
     data["adverse_media"] = [
         x.model_dump()
         for x in _clean_adverse_vendor_scoped(
@@ -356,6 +490,7 @@ def validate_report_sync(report: VRAReport, verify_urls: bool = False) -> VRARep
     """Synchronous variant (no HTTP checks unless verify_urls and extended)."""
     data = report.model_dump()
     vn = str((report.vendor or {}).get("name") or "")
+    gs = str((report.vendor or {}).get("gst") or "")
     sections = [
         "company_profile",
         "management",
@@ -370,10 +505,9 @@ def validate_report_sync(report: VRAReport, verify_urls: bool = False) -> VRARep
     ]
     for name in sections:
         findings = [Finding.model_validate(x) for x in data.get(name, [])]
-        cleaned = _clean_finding_list(findings, name, vendor_name=vn)
+        cleaned = _clean_finding_list(findings, name, vendor_name=vn, gst=gs)
         data[name] = [x.model_dump() for x in cleaned]
 
-    gs = str((report.vendor or {}).get("gst") or "")
     data["adverse_media"] = [
         x.model_dump()
         for x in _clean_adverse_vendor_scoped(

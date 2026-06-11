@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import WRITABLE_DIR
+from app.core.screening import screening_summary
 from app.core.vra_service import generate_vra_bundle
 from app.database import get_db
 from app.schemas import VendorGenerateRequest, VendorGenerateResponse
@@ -64,7 +65,12 @@ async def generate_report(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     pdf_url = f"/download/pdf/{Path(rel).name}"
-    return VendorGenerateResponse(report=report, pdf_url=pdf_url, audit_id=audit.id)
+    return VendorGenerateResponse(
+        report=report,
+        screening=screening_summary(report),
+        pdf_url=pdf_url,
+        audit_id=audit.id,
+    )
 
 
 @router.get("/download/pdf/{filename}")

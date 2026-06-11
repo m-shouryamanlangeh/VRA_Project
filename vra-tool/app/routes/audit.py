@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.kv_store import get_value
+from app.core.timeutil import utcnow
 from app.database import get_db
 from app.models import AuditLog
 from app.schemas import AuditListResponse
@@ -95,7 +96,7 @@ def api_usage(db: Session = Depends(get_db)) -> dict:
     plus the configurable free-tier daily request budget for context — not a
     live balance fetched from Google.
     """
-    now = datetime.utcnow()
+    now = utcnow()
     start_today = datetime(now.year, now.month, now.day)
 
     def _agg(since: datetime | None) -> tuple[int, int]:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.crypto import CryptoError, encrypt_secret, get_fernet
 from app.core.kv_store import get_value, set_value
+from app.core.timeutil import utcnow
 from app.core.llm.factory import get_provider
 from app.core.llm.gemini import (
     GeminiProvider,
@@ -65,7 +65,7 @@ def _settings_state(db: Session) -> SettingsStateResponse:
     return SettingsStateResponse(
         llm_provider=get_value(db, "llm_provider", "gemini"),
         llm_model=get_value(db, "llm_model", "gemini-2.0-flash"),
-        temperature=float(get_value(db, "llm_temperature", "0.2")),
+        temperature=float(get_value(db, "llm_temperature", "0.0")),
         max_output_tokens=int(get_value(db, "llm_max_output_tokens", "16384")),
         daily_quota_limit=limit,
         keys=keys,
@@ -181,7 +181,7 @@ async def api_settings_test(
     if not candidates:
         raise HTTPException(status_code=400, detail="No Gemini API keys available to test.")
     model = get_value(db, "llm_model", "gemini-2.0-flash")
-    temperature = float(get_value(db, "llm_temperature", "0.2"))
+    temperature = float(get_value(db, "llm_temperature", "0.0"))
     max_out = int(get_value(db, "llm_max_output_tokens", "16384"))
     _row, secret, label = candidates[0]
     prov = get_provider(
@@ -201,7 +201,7 @@ async def api_settings_test(
         logger.warning("Test connection error: %s", exc)
         ok = False
         detail = str(exc)
-    set_value(db, "status_last_test_iso", dt.datetime.utcnow().isoformat())
+    set_value(db, "status_last_test_iso", utcnow().isoformat())
     set_value(db, "status_last_test_ok", "true" if ok else "false")
     if detail:
         set_value(db, "status_last_test_message", detail[:2000])

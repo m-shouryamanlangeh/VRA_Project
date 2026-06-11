@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import logging
 from typing import Any
 
@@ -21,7 +20,8 @@ from app.core.llm.gemini import (
 from app.core.llm.openrouter import OpenRouterProvider
 from app.core.pdf_generator import render_vra_pdf
 from app.core.collectors import gather_evidence
-from app.core.hybrid_report import build_vra_report
+from app.core.hybrid_report import build_vra_report, deterministic_synthesis
+from app.core.narrative import populate_narrative
 from app.core.prompts import (
     format_adverse_media_prompt,
     format_synthesis_prompt,
@@ -30,6 +30,7 @@ from app.core.prompts import (
 )
 from app.core import quota
 from app.core.report_normalization import _ensure_calibrated_rubric, normalize_legacy_vra_payload
+from app.core.timeutil import utcnow
 from app.core.validator import validate_report_async
 from app.models import ApiKey, AuditLog
 from app.schemas import AdversePassResult, SynthesisResult, VRAReport
@@ -382,7 +383,7 @@ async def _run_gemini_attempts(
                 if try_model != model:
                     logger.info("Used fallback model %s (preferred: %s)", try_model, model)
                 if row is not None:
-                    row.last_used_at = dt.datetime.utcnow()
+                    row.last_used_at = utcnow()
                     quota.increment_usage(db, row.id, 1)
                     db.add(row)
                 return out, row, label, total_tokens
@@ -454,7 +455,7 @@ async def _run_openrouter_attempts(
                         "OpenRouter: used fallback model %s (configured: %s)", try_model, model
                     )
                 if row is not None:
-                    row.last_used_at = dt.datetime.utcnow()
+                    row.last_used_at = utcnow()
                     quota.increment_usage(db, row.id, 1)
                     db.add(row)
                 return out, row, label, total_tokens
@@ -534,6 +535,84 @@ GEMINI_MODEL_CHOICES: tuple[str, ...] = (
 # Main pipeline
 # ---------------------------------------------------------------------------
 
+async def _generate_deterministic_bundle(
+    db: Session,
+    *,
+    vendor_name: str,
+    gst: str,
+    org_type: str,
+    request_type: str = "SINGLE",
+    verify_urls: bool = True,
+    user: str = "system",
+) -> tuple[VRAReport, str, AuditLog]:
+    """LLM-free pipeline: collectors → deterministic framework → templated narrative → PDF.
+
+    Invoked when ``USE_LLM=false``. No Gemini / OpenRouter call is made and no API
+    key is required. Facts come from the collectors; dimension scores, confidence,
+    the six-tier recommendation and entity resolution come from
+    ``app.core.report_normalization``; the executive narrative is templated from
+    those calibrated outputs by ``app.core.narrative``.
+    """
+    date_str = utcnow().strftime("%Y-%m-%d")
+    try:
+        evidence = await gather_evidence(vendor_name, gst, org_type)
+        report = build_vra_report(evidence, deterministic_synthesis(), date_str=date_str)
+        report = _ensure_vendor(report, vendor_name, gst, org_type)
+
+        report = await validate_report_async(report, verify_urls=verify_urls)
+
+        # Authoritative deterministic scoring + explainability block.
+        final = report.model_dump()
+        _ensure_calibrated_rubric(final)
+        # Templated analyst prose from the calibrated why_rating block.
+        populate_narrative(final)
+        report = VRAReport.model_validate(final)
+
+        seq = next_pdf_sequence(db)
+        pdf_path = render_vra_pdf(report, seq, vendor_name)
+        rel = f"output/{pdf_path.name}"
+
+        set_value(db, "status_last_generation_iso", utcnow().isoformat())
+
+        audit = AuditLog(
+            vendor_name=vendor_name,
+            gst=gst,
+            org_type=org_type,
+            request_type=request_type,
+            provider_used="deterministic",
+            key_label_used="deterministic",
+            tokens_used=None,
+            pdf_path=rel,
+            status="SUCCESS",
+            user=user,
+        )
+        db.add(audit)
+        db.commit()
+        db.refresh(audit)
+        return report, rel, audit
+
+    except Exception as exc:
+        logger.exception("Deterministic VRA generation failed")
+        db.rollback()
+        audit = AuditLog(
+            vendor_name=vendor_name,
+            gst=gst,
+            org_type=org_type,
+            request_type=request_type,
+            provider_used="deterministic",
+            key_label_used=None,
+            tokens_used=None,
+            pdf_path=None,
+            status="FAILED",
+            error_message=str(exc)[:4000],
+            user=user,
+        )
+        db.add(audit)
+        db.commit()
+        db.refresh(audit)
+        raise RuntimeError(str(exc)) from exc
+
+
 async def generate_vra_bundle(
     db: Session,
     *,
@@ -557,6 +636,21 @@ async def generate_vra_bundle(
     Returns:
         Tuple of (report, relative PDF path ``output/...``, audit ORM object).
     """
+    # Fully deterministic, LLM-free mode: no provider, no API key, no model.
+    # The whole report is produced by collectors + the deterministic risk
+    # framework + the templated narrative. Short-circuit all LLM setup below.
+    use_llm = app_settings.USE_LLM
+    if not use_llm:
+        return await _generate_deterministic_bundle(
+            db,
+            vendor_name=vendor_name,
+            gst=gst,
+            org_type=org_type,
+            request_type=request_type,
+            verify_urls=verify_urls,
+            user=user,
+        )
+
     provider = (get_value(db, "llm_provider", "gemini") or "gemini").strip().lower()
     candidates = build_key_candidates(db, provider, user_api_key=user_api_key)
 
@@ -586,7 +680,7 @@ async def generate_vra_bundle(
     max_output_tokens = int(get_value(db, "llm_max_output_tokens", "16384"))
 
     try:
-        date_str = dt.datetime.utcnow().strftime("%Y-%m-%d")
+        date_str = utcnow().strftime("%Y-%m-%d")
 
         if app_settings.USE_HYBRID_MODE:
             evidence = await gather_evidence(vendor_name, gst, org_type)
@@ -791,7 +885,7 @@ async def generate_vra_bundle(
         rel = f"output/{pdf_path.name}"
 
         total_tok = tok1 + tok2
-        set_value(db, "status_last_generation_iso", dt.datetime.utcnow().isoformat())
+        set_value(db, "status_last_generation_iso", utcnow().isoformat())
 
         audit = AuditLog(
             vendor_name=vendor_name,

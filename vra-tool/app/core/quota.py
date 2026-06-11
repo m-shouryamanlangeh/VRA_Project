@@ -8,6 +8,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.timeutil import utcnow
 from app.models import ApiKey, KeyDailyUsage
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ WARN_FRACTION = 0.80
 
 def today_utc_date() -> dt.date:
     """Calendar date in UTC for quota bucketing."""
-    return dt.datetime.utcnow().date()
+    return utcnow().date()
 
 
 def get_today_usage(db: Session, api_key_id: int) -> int:
