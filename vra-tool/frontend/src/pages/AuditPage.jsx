@@ -15,6 +15,8 @@ export default function AuditPage() {
   const [page, setPage] = useState(1);
   const [data, setData] = useState({ items: [], total: 0, page: 1 });
   const [loading, setLoading] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [busy, setBusy] = useState(false);
 
   const csvHref = useMemo(() => {
     const qs = new URLSearchParams();
@@ -51,11 +53,59 @@ export default function AuditPage() {
     return () => {
       cancelled = true;
     };
-  }, [page, appliedFilters, showToast]);
+  }, [page, appliedFilters, showToast, reloadKey]);
 
   function applyFilters() {
     setPage(1);
     setAppliedFilters({ ...filters });
+  }
+
+  async function deleteEntry(row) {
+    if (busy) return;
+    if (!window.confirm(`Delete the history entry for "${row.vendor_name}"?`))
+      return;
+    setBusy(true);
+    try {
+      const res = await apiFetch("/api/audit/" + row.id, { method: "DELETE" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "Failed to delete entry");
+      showToast("History entry deleted", true);
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      showToast(err.message || String(err), false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearHistory() {
+    if (busy) return;
+    const scoped =
+      appliedFilters.vendor || appliedFilters.from || appliedFilters.to;
+    const msg = scoped
+      ? "Delete all history entries matching the current filters? This cannot be undone."
+      : "Delete the ENTIRE search history? This cannot be undone.";
+    if (!window.confirm(msg)) return;
+    setBusy(true);
+    try {
+      const qs = new URLSearchParams();
+      if (appliedFilters.vendor) qs.set("vendor", appliedFilters.vendor);
+      if (appliedFilters.from) qs.set("date_from", appliedFilters.from);
+      if (appliedFilters.to) qs.set("date_to", appliedFilters.to);
+      const tail = qs.toString();
+      const res = await apiFetch("/api/audit" + (tail ? "?" + tail : ""), {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "Failed to clear history");
+      showToast(`Deleted ${body.deleted ?? 0} entr${(body.deleted === 1) ? "y" : "ies"}`, true);
+      setPage(1);
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      showToast(err.message || String(err), false);
+    } finally {
+      setBusy(false);
+    }
   }
 
   const total = data.total || 0;
@@ -107,6 +157,14 @@ export default function AuditPage() {
         >
           Export CSV
         </a>
+        <button
+          type="button"
+          onClick={clearHistory}
+          disabled={busy || total === 0}
+          className="px-3 py-1.5 rounded border border-red-200 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 ml-auto"
+        >
+          Clear history
+        </button>
       </div>
 
       <div className="bg-white rounded-xl border border-slate-100 overflow-x-auto shadow-sm">
@@ -120,6 +178,7 @@ export default function AuditPage() {
               <th className="p-2 border-b">Status</th>
               <th className="p-2 border-b">Provider</th>
               <th className="p-2 border-b">PDF</th>
+              <th className="p-2 border-b"></th>
             </tr>
           </thead>
           <tbody>
@@ -147,12 +206,23 @@ export default function AuditPage() {
                       "—"
                     )}
                   </td>
+                  <td className="p-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => deleteEntry(row)}
+                      disabled={busy}
+                      className="text-red-600 hover:underline disabled:opacity-40"
+                      title="Delete this history entry"
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               );
             })}
             {!loading && (data.items || []).length === 0 && (
               <tr>
-                <td className="p-4 text-center text-slate-500" colSpan={7}>
+                <td className="p-4 text-center text-slate-500" colSpan={8}>
                   No audit entries.
                 </td>
               </tr>

@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 import io
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import func, select
+from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.kv_store import get_value
@@ -176,3 +177,60 @@ def api_audit_export_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="vra_audit.csv"'},
     )
+
+
+# Repo root (…/vra-tool): routes/ → app/ → vra-tool/. PDFs live under output/.
+_OUTPUT_DIR = (Path(__file__).resolve().parents[2] / "output").resolve()
+
+
+def _remove_pdf(pdf_path: str | None) -> None:
+    """Delete the PDF artifact for a history entry, if it sits under output/.
+
+    Guarded against path traversal: only files resolving inside ``output/`` are
+    unlinked. Missing files and any OS error are ignored — clearing history must
+    never fail because a stale PDF is already gone.
+    """
+    if not pdf_path:
+        return
+    try:
+        target = (_OUTPUT_DIR / Path(pdf_path).name).resolve()
+        if target.parent == _OUTPUT_DIR and target.is_file():
+            target.unlink()
+    except OSError:
+        pass
+
+
+@router.delete("/api/audit/{audit_id}")
+def api_audit_delete(audit_id: int, db: Session = Depends(get_db)) -> dict:
+    """Delete a single search-history entry (and its PDF)."""
+    row = db.get(AuditLog, audit_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="History entry not found")
+    _remove_pdf(row.pdf_path)
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "deleted": 1}
+
+
+@router.delete("/api/audit")
+def api_audit_clear(
+    db: Session = Depends(get_db),
+    vendor: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Clear search history. With no filters this wipes the whole log; the same
+    vendor/date filters as the list view scope the deletion to what's shown."""
+    conds = _audit_conditions(vendor, date_from, date_to)
+    sel = select(AuditLog)
+    for c in conds:
+        sel = sel.where(c)
+    rows = list(db.execute(sel).scalars().all())
+    for r in rows:
+        _remove_pdf(r.pdf_path)
+    del_stmt = sa_delete(AuditLog)
+    for c in conds:
+        del_stmt = del_stmt.where(c)
+    db.execute(del_stmt)
+    db.commit()
+    return {"ok": True, "deleted": len(rows)}
